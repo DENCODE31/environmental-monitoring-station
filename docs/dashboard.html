@@ -6,6 +6,8 @@
   <title>Estación de Monitoreo Ambiental — ESP32-C6</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.3.4/mqtt.min.js"></script>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500&display=swap" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,300,0,0&display=swap" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -16,6 +18,7 @@
       --blue:       #58a6ff;
       --purple:     #bc8cff;
       --cyan:       #39d353;
+      --primary-cyan: #00daf3;
       --muted:      #9aa5b1;
       --text:       #e6edf3;
       --border:     rgba(255,255,255,0.09);
@@ -32,7 +35,7 @@
       overflow: hidden;
     }
     body {
-      background: #00030c url('background.png') center 30% / 60% auto no-repeat fixed;
+      background: #00030c url('background.png') center 12% / 60% auto no-repeat fixed;
       color: var(--text);
       font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
       position: relative;
@@ -49,6 +52,22 @@
     }
     body.alarm-state::before {
       background: rgba(70, 8, 6, 0.66);
+    }
+
+    /* Overlay de "casa apagada" — visible cuando el broker está desconectado.
+       Oscurece y dessatura solo el fondo (las lámparas se ven apagadas). */
+    #room-dim {
+      position: fixed; inset: 0;
+      z-index: 1;
+      pointer-events: none;
+      background: rgba(3, 6, 14, 0.62);
+      backdrop-filter: brightness(0.45) saturate(0.35);
+      -webkit-backdrop-filter: brightness(0.45) saturate(0.35);
+      opacity: 1;                       /* arranca apagado */
+      transition: opacity 1.6s ease;
+    }
+    body.broker-connected #room-dim {
+      opacity: 0;                       /* broker OK → casa iluminada */
     }
 
     /* ══ SIDEBAR IZQUIERDO ══ */
@@ -347,6 +366,87 @@
     .gas-bar.danger  { background: var(--red); }
     .gas-bar.warning { background: var(--orange); }
 
+    /* ══ CÁPSULAS DE TELEMETRÍA (glass + contorno cian) ══ */
+    .material-symbols-outlined {
+      font-family: 'Material Symbols Outlined';
+      font-weight: normal;
+      font-style: normal;
+      line-height: 1;
+      font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24;
+    }
+    .capsule {
+      flex: 1;
+      min-width: 0;
+      background: rgba(39, 54, 71, 0.40);
+      backdrop-filter: blur(32px);
+      -webkit-backdrop-filter: blur(32px);
+      border: 1px solid rgba(0, 218, 243, 0.30);
+      border-top: 1px solid rgba(255, 255, 255, 0.12);
+      border-left: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 14px;
+      padding: 18px 20px;
+      box-shadow: 0 0 15px rgba(0, 218, 243, 0.10), var(--shadow);
+      transition: transform .3s ease, background .3s ease, box-shadow .3s ease;
+    }
+    .capsule:hover {
+      background: rgba(39, 54, 71, 0.60);
+      transform: translateY(-3px);
+      box-shadow: 0 0 22px rgba(0, 218, 243, 0.22), 0 16px 48px rgba(0,0,0,0.7);
+    }
+    .cap-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 12px;
+    }
+    .cap-icon {
+      font-size: 26px;
+      color: var(--accent, var(--primary-cyan));
+      filter: drop-shadow(0 0 6px currentColor);
+    }
+    .cap-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-top: 4px;
+    }
+    .cap-value {
+      font-size: 2.3rem;
+      font-weight: 200;
+      line-height: 1;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+      transition: color .4s;
+      white-space: nowrap;
+    }
+    .cap-bar-wrap {
+      margin-top: 12px;
+      background: rgba(255,255,255,0.08);
+      border-radius: 999px;
+      height: 4px;
+      overflow: hidden;
+    }
+    .cap-bar {
+      height: 100%;
+      border-radius: 999px;
+      background: var(--accent, var(--primary-cyan));
+      width: 0%;
+      box-shadow: 0 0 8px var(--accent, var(--primary-cyan));
+      transition: width .8s ease, background .4s;
+    }
+    .cap-caption {
+      margin-top: 12px;
+      font-size: 0.72rem;
+      color: var(--muted);
+      opacity: 0.7;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .card-offline .cap-value { color: var(--muted) !important; }
+
     /* ══ FAN SVG ══ */
     .fan-svg-wrap {
       width: 52px; height: 52px;
@@ -418,6 +518,36 @@
     #log .linf { color: var(--blue); }
     #log .lwrn { color: var(--orange); }
 
+    /* ══ BOTÓN PARO DE EMERGENCIA ══ */
+    .emergency-btn {
+      width: 100%;
+      padding: 13px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      border-radius: 10px;
+      border: 1px solid rgba(248,81,73,0.35);
+      background: rgba(248,81,73,0.13);
+      color: var(--red);
+      font-weight: 700;
+      font-size: 0.78rem;
+      letter-spacing: 0.08em;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: background .25s, transform .1s, opacity .25s;
+    }
+    .emergency-btn .material-symbols-outlined { font-size: 20px; }
+    .emergency-btn:hover:not(:disabled) { background: var(--red); color: #fff; }
+    .emergency-btn:active:not(:disabled) { transform: scale(0.97); }
+    .emergency-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    .emergency-btn.engaged {
+      background: var(--red);
+      color: #fff;
+      border-color: var(--red);
+      animation: abp 1s ease infinite;
+    }
+
     /* ══ FOOTER ══ */
     footer {
       font-size: 0.62rem;
@@ -429,6 +559,9 @@
   </style>
 </head>
 <body>
+
+<!-- Overlay "casa apagada" cuando el broker está desconectado -->
+<div id="room-dim"></div>
 
 <!-- ══ CANVAS FLUJO DE VIENTO ══ -->
 <canvas id="wind-canvas"></canvas>
@@ -520,6 +653,12 @@
     <div id="log"></div>
   </div>
 
+  <!-- PARO DE EMERGENCIA -->
+  <button class="emergency-btn" id="btn-emergency" onclick="toggleEmergency()" disabled>
+    <span class="material-symbols-outlined" style="font-variation-settings:'FILL' 1;">report</span>
+    <span id="emergency-label">PARO DE EMERGENCIA</span>
+  </button>
+
   <footer>Yeison Dénnir Cuastumal · UNAL · Instrumentación Electrónica</footer>
 
 </div><!-- /sidebar -->
@@ -534,34 +673,36 @@
 <div class="bottom-bar">
 
   <!-- TEMPERATURA -->
-  <div class="card card-temp card-offline" id="card-temp">
-    <div class="card-icon-wrap" style="color:var(--orange)">🌡️</div>
-    <div class="card-body">
-      <div class="card-label">Temperatura</div>
-      <div class="card-value" id="val-temp">--<span class="card-unit">°C</span></div>
-      <div class="card-sub"  id="sub-temp">Sin datos</div>
+  <div class="capsule card-temp card-offline" id="card-temp">
+    <div class="cap-head">
+      <span class="material-symbols-outlined cap-icon">thermostat</span>
+      <span class="cap-label">Celsius</span>
     </div>
+    <div class="cap-value" id="val-temp">--<span class="card-unit">°C</span></div>
+    <div class="cap-bar-wrap"><div class="cap-bar" id="temp-bar"></div></div>
+    <p class="cap-caption" id="sub-temp">Sin datos</p>
   </div>
 
   <!-- HUMEDAD RELATIVA -->
-  <div class="card card-hum card-offline" id="card-hum">
-    <div class="card-icon-wrap" style="color:var(--blue)">💧</div>
-    <div class="card-body">
-      <div class="card-label">Humedad Relativa</div>
-      <div class="card-value" id="val-hum">--<span class="card-unit">%</span></div>
-      <div class="card-sub"  id="sub-hum">Sin datos</div>
+  <div class="capsule card-hum card-offline" id="card-hum">
+    <div class="cap-head">
+      <span class="material-symbols-outlined cap-icon">humidity_percentage</span>
+      <span class="cap-label">Relativa</span>
     </div>
+    <div class="cap-value" id="val-hum">--<span class="card-unit">%</span></div>
+    <div class="cap-bar-wrap"><div class="cap-bar" id="hum-bar"></div></div>
+    <p class="cap-caption" id="sub-hum">Sin datos</p>
   </div>
 
   <!-- CALIDAD DE AIRE -->
-  <div class="card card-gas card-offline" id="card-gas">
-    <div class="card-icon-wrap" style="color:var(--purple)">💨</div>
-    <div class="card-body">
-      <div class="card-label">Calidad de Aire · MQ-135</div>
-      <div class="card-value" id="val-gas">--<span class="card-unit">ppm</span></div>
-      <div class="gas-bar-wrap"><div class="gas-bar" id="gas-bar"></div></div>
-      <div class="card-sub" id="sub-gas">Sin datos</div>
+  <div class="capsule card-gas card-offline" id="card-gas">
+    <div class="cap-head">
+      <span class="material-symbols-outlined cap-icon">air</span>
+      <span class="cap-label">MQ-135 · PPM</span>
     </div>
+    <div class="cap-value" id="val-gas">--<span class="card-unit">ppm</span></div>
+    <div class="cap-bar-wrap"><div class="gas-bar" id="gas-bar"></div></div>
+    <p class="cap-caption" id="sub-gas">Sin datos</p>
   </div>
 
 </div>
@@ -679,6 +820,8 @@ function updateCards(d) {
   const te = document.getElementById('val-temp');
   te.innerHTML = `${d.temp.toFixed(1)}<span class="card-unit">°C</span>`;
   te.style.color = d.temp > THRESHOLDS.temp_warn ? 'var(--red)' : 'var(--orange)';
+  document.getElementById('temp-bar').style.width =
+    clampN(mapN(d.temp, SIM.tempOutMin, SIM.tempOutMax, 0, 100), 0, 100) + '%';
   document.getElementById('sub-temp').textContent = d.temp > THRESHOLDS.temp_warn ? '⚠️ Temperatura elevada' : 'Normal';
   document.getElementById('card-temp').classList.remove('card-offline');
   flash('val-temp');
@@ -688,6 +831,7 @@ function updateCards(d) {
   he.innerHTML = `${d.hum.toFixed(1)}<span class="card-unit">%</span>`;
   const humOk = d.hum >= THRESHOLDS.hum_min && d.hum <= THRESHOLDS.hum_max;
   he.style.color = humOk ? 'var(--blue)' : 'var(--orange)';
+  document.getElementById('hum-bar').style.width = clampN(d.hum, 0, 100) + '%';
   document.getElementById('sub-hum').textContent = humOk ? 'Humedad normal' : (d.hum < THRESHOLDS.hum_min ? '⚠️ Muy seco' : '⚠️ Muy húmedo');
   document.getElementById('card-hum').classList.remove('card-offline');
   flash('val-hum');
@@ -794,10 +938,12 @@ function connectMQTT() {
 
   client.on('connect', () => {
     logMsg(`Broker OK (${broker})`, 'ok');
+    document.body.classList.add('broker-connected');
     document.getElementById('badge-broker').className = 'badge connected';
     document.getElementById('badge-broker-label').textContent = broker;
     document.getElementById('btn-connect').disabled = true;
     document.getElementById('btn-disconnect').disabled = false;
+    document.getElementById('btn-emergency').disabled = false;
     client.subscribe(`${root}/data`,   { qos: 0 });
     client.subscribe(`${root}/status`, { qos: 1 });
     logMsg(`Suscrito a ${root}/data y ${root}/status`, 'inf');
@@ -818,19 +964,42 @@ function connectMQTT() {
   });
 
   client.on('error',     e  => logMsg('Error: '+e.message, 'err'));
-  client.on('reconnect', () => { logMsg('Reconectando…','wrn'); document.getElementById('badge-broker').className='badge disconnected'; });
+  client.on('reconnect', () => { logMsg('Reconectando…','wrn'); document.body.classList.remove('broker-connected'); document.getElementById('badge-broker').className='badge disconnected'; });
   client.on('close',     () => {
     logMsg('Conexión cerrada','wrn');
+    document.body.classList.remove('broker-connected');
     document.getElementById('badge-broker').className = 'badge disconnected';
     document.getElementById('badge-broker-label').textContent = 'Broker desconectado';
     document.getElementById('btn-connect').disabled  = false;
     document.getElementById('btn-disconnect').disabled = true;
+    document.getElementById('btn-emergency').disabled = true;
     setBoardStatus(false);
   });
 }
 
 function disconnectMQTT() {
   if (client) { client.end(true); client = null; logMsg('Desconectado', 'inf'); }
+}
+
+/* ── Paro de emergencia: publica stop/resume a ems/cmd ── */
+let emergencyActive = false;
+function toggleEmergency() {
+  if (!client) { logMsg('Sin broker: no se puede enviar comando', 'err'); return; }
+  const root = document.getElementById('cfg-topic').value.trim();
+  const btn  = document.getElementById('btn-emergency');
+  const lbl  = document.getElementById('emergency-label');
+  emergencyActive = !emergencyActive;
+  if (emergencyActive) {
+    client.publish(`${root}/cmd`, 'stop', { qos: 1 });
+    btn.classList.add('engaged');
+    lbl.textContent = 'REANUDAR EXTRACTOR';
+    logMsg('⛔ PARO DE EMERGENCIA enviado — extractor forzado OFF', 'err');
+  } else {
+    client.publish(`${root}/cmd`, 'resume', { qos: 1 });
+    btn.classList.remove('engaged');
+    lbl.textContent = 'PARO DE EMERGENCIA';
+    logMsg('Paro liberado — control automático reanudado', 'ok');
+  }
 }
 
 /* ══ SISTEMA DE VIENTO ══ */
@@ -855,7 +1024,7 @@ function getRoomPolygon() {
   const imgW = vw * 0.60;
   const imgH = imgW * (1024 / 1536);
   const imgX = (vw - imgW) / 2;
-  const imgY = Math.max(0, (vh - imgH) * 0.30);
+  const imgY = Math.max(0, (vh - imgH) * 0.12);
 
   return [
     { x: imgX + imgW * 0.655, y: imgY + imgH * 0.27 },  /* top    */
