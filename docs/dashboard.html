@@ -1,0 +1,957 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Estación de Monitoreo Ambiental — ESP32-C6</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.3.4/mqtt.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --green:      #3fb950;
+      --red:        #f85149;
+      --orange:     #d29922;
+      --blue:       #58a6ff;
+      --purple:     #bc8cff;
+      --cyan:       #39d353;
+      --muted:      #9aa5b1;
+      --text:       #e6edf3;
+      --border:     rgba(255,255,255,0.09);
+      --surface:    rgba(10, 14, 20, 0.60);
+      --surface2:   rgba(20, 26, 34, 0.70);
+      --radius:     13px;
+      --blur:       blur(20px);
+      --shadow:     0 8px 32px rgba(0,0,0,0.6);
+    }
+
+    /* ══ FONDO ══ */
+    html, body {
+      height: 100%;
+      overflow: hidden;
+    }
+    body {
+      background: #00030c url('room-bg.jpg') center 30% / 60% auto no-repeat fixed;
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      position: relative;
+    }
+
+    /* Overlay base */
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background: transparent;
+      transition: background 1.4s ease;
+      z-index: 0;
+      pointer-events: none;
+    }
+    body.alarm-state::before {
+      background: rgba(70, 8, 6, 0.66);
+    }
+
+    /* ══ SIDEBAR IZQUIERDO ══ */
+    .sidebar {
+      position: fixed;
+      top: 0; left: 0;
+      width: 360px;
+      height: 100vh;
+      overflow-y: auto;
+      overflow-x: hidden;
+      z-index: 10;
+      padding: 16px 14px 16px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      /* scrollbar delgado */
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.1) transparent;
+    }
+    .sidebar::-webkit-scrollbar { width: 4px; }
+    .sidebar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 4px; }
+
+    /* ══ HEADER ══ */
+    .hdr {
+      background: var(--surface);
+      backdrop-filter: var(--blur);
+      -webkit-backdrop-filter: var(--blur);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 13px 16px;
+      box-shadow: var(--shadow);
+      flex-shrink: 0;
+    }
+    .hdr h1 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      letter-spacing: -0.2px;
+      text-shadow: 0 2px 8px rgba(0,0,0,0.7);
+      line-height: 1.3;
+    }
+    .hdr p {
+      font-size: 0.7rem;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    /* ══ BADGES (esquina superior derecha) ══ */
+    .badges {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 20;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      background: var(--surface);
+      backdrop-filter: var(--blur);
+      -webkit-backdrop-filter: var(--blur);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 12px;
+      box-shadow: var(--shadow);
+    }
+    .badge {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.05);
+      white-space: nowrap;
+      transition: all 0.4s;
+    }
+    .badge .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex-shrink:0; }
+    .badge.connected .dot     { background: var(--green); animation: pg 1.5s infinite; }
+    .badge.disconnected .dot  { background: var(--red);   animation: pr 1.5s infinite; }
+    .badge.board-online .dot  { background: var(--cyan);  animation: pc 1.5s infinite; }
+    .badge.alarm-active       { border-color: var(--red); background: rgba(248,81,73,0.13); color: var(--red); }
+    .badge.alarm-active .dot  { background: var(--red); animation: pr 0.7s infinite; }
+
+    @keyframes pg { 0%,100%{box-shadow:0 0 0 0 rgba(63,185,80,.6)} 50%{box-shadow:0 0 0 4px rgba(63,185,80,0)} }
+    @keyframes pr { 0%,100%{box-shadow:0 0 0 0 rgba(248,81,73,.6)} 50%{box-shadow:0 0 0 4px rgba(248,81,73,0)} }
+    @keyframes pc { 0%,100%{box-shadow:0 0 0 0 rgba(57,211,83,.6)} 50%{box-shadow:0 0 0 4px rgba(57,211,83,0)} }
+
+    /* ══ CONFIG BAR ══ */
+    .cfg {
+      background: var(--surface);
+      backdrop-filter: var(--blur);
+      -webkit-backdrop-filter: var(--blur);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 11px 13px;
+      box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      flex-shrink: 0;
+    }
+    .cfg-row { display: flex; gap: 7px; align-items: center; }
+    .cfg label { font-size: 0.68rem; color: var(--muted); white-space: nowrap; min-width: 52px; }
+    .cfg input {
+      flex: 1;
+      background: rgba(0,0,0,0.3);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      color: var(--text);
+      padding: 5px 8px;
+      font-size: 0.75rem;
+    }
+    .cfg input:focus { outline: none; border-color: var(--blue); }
+    .cfg-btns { display: flex; gap: 7px; }
+    .btn {
+      flex: 1; padding: 6px 10px;
+      border-radius: 8px; border: none;
+      cursor: pointer; font-size: 0.75rem; font-weight: 600;
+      transition: opacity .2s, transform .1s;
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn-connect    { background: var(--green); color: #060a0f; }
+    .btn-disconnect { background: var(--red);   color: #fff; }
+    .btn:disabled   { opacity: 0.35; cursor: not-allowed; }
+
+    /* ══ ALARM BANNER ══ */
+    .alarm-banner {
+      display: none;
+      background: rgba(248,81,73,0.15);
+      border: 1px solid var(--red);
+      border-radius: var(--radius);
+      padding: 9px 13px;
+      color: var(--red);
+      font-weight: 600;
+      font-size: 0.78rem;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+      animation: abp 1s ease infinite;
+    }
+    .alarm-banner.visible { display: flex; }
+    @keyframes abp {
+      0%,100% { background: rgba(248,81,73,0.15); }
+      50%      { background: rgba(248,81,73,0.30); }
+    }
+
+    /* ══ CANVAS VIENTO ══ */
+    #wind-canvas {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 5;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 1.2s ease;
+    }
+    #wind-canvas.active { opacity: 1; }
+
+    /* ══ TÍTULO FLOTANTE ══ */
+    .floating-title {
+      position: fixed;
+      bottom: 340px;
+      right: 156px;
+      z-index: 20;
+      text-align: right;
+      transform: rotate(-28deg);
+      transform-origin: right bottom;
+    }
+    .floating-title h1 {
+      font-size: 1.3rem;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      text-shadow: 0 2px 12px rgba(0,0,0,0.9), 0 0 30px rgba(0,0,0,0.7);
+      line-height: 1.3;
+    }
+    .floating-title p {
+      font-size: 0.72rem;
+      color: var(--muted);
+      margin-top: 3px;
+      text-shadow: 0 1px 6px rgba(0,0,0,0.9);
+    }
+
+    /* ══ BARRA INFERIOR — cards de sensores ══ */
+    .bottom-bar {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 20;
+      display: flex;
+      gap: 12px;
+      padding: 0;
+      /* Se ajusta al ancho disponible sin pisar el sidebar */
+      max-width: calc(100vw - 380px);
+      width: calc(100vw - 400px);
+      margin-left: 180px; /* centrado visual desplazado a la derecha del sidebar */
+    }
+
+    /* ══ SENSOR CARDS ══ */
+    .card {
+      background: var(--surface);
+      backdrop-filter: var(--blur);
+      -webkit-backdrop-filter: var(--blur);
+      border: 1px solid var(--border);
+      border-top: 3px solid var(--accent, var(--border));
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      box-shadow: var(--shadow), inset 0 1px 0 rgba(255,255,255,0.06);
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex: 1;
+      min-width: 0;
+      transition: transform .2s, box-shadow .25s;
+      position: relative;
+      overflow: hidden;
+    }
+    .card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 16px 48px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.10);
+    }
+    .card-temp { --accent: var(--orange); }
+    .card-hum  { --accent: var(--blue); }
+    .card-gas  { --accent: var(--purple); }
+    .card-fan  { --accent: var(--green); }
+    .card-gas.alarm { --accent: var(--red); border-top-color: var(--red); }
+
+    .card-icon-wrap {
+      font-size: 1.8rem;
+      flex-shrink: 0;
+      width: 40px;
+      text-align: center;
+      filter: drop-shadow(0 0 6px currentColor);
+    }
+    .card-body { flex: 1; min-width: 0; }
+    .card-label {
+      font-size: 0.63rem;
+      text-transform: uppercase;
+      letter-spacing: 0.9px;
+      color: var(--muted);
+      margin-bottom: 2px;
+      white-space: nowrap;
+    }
+    .card-value {
+      font-size: 2rem;
+      font-weight: 700;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+      transition: color .4s;
+      white-space: nowrap;
+    }
+    .card-unit {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-left: 2px;
+      vertical-align: super;
+    }
+    .card-sub {
+      font-size: 0.67rem;
+      color: var(--muted);
+      margin-top: 4px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* card del sidebar (extractor) — layout horizontal compacto */
+    .card-sidebar {
+      border-top: none;
+      border-left: 3px solid var(--accent, var(--border));
+      flex: unset;
+    }
+    .card-sidebar:hover { transform: translateX(3px); }
+
+    /* flash update */
+    @keyframes flash { 0%{opacity:1} 30%{opacity:.25} 100%{opacity:1} }
+    .updated { animation: flash .45s ease; }
+
+    /* offline dim */
+    .card-offline .card-value { color: var(--muted) !important; }
+
+    /* ══ GAS BAR ══ */
+    .gas-bar-wrap {
+      margin-top: 6px;
+      background: rgba(255,255,255,0.07);
+      border-radius: 999px;
+      height: 5px;
+      overflow: hidden;
+    }
+    .gas-bar {
+      height: 100%;
+      border-radius: 999px;
+      background: var(--purple);
+      width: 0%;
+      transition: width .8s ease, background .4s;
+    }
+    .gas-bar.danger  { background: var(--red); }
+    .gas-bar.warning { background: var(--orange); }
+
+    /* ══ FAN SVG ══ */
+    .fan-svg-wrap {
+      width: 52px; height: 52px;
+      flex-shrink: 0;
+      position: relative;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .fan-svg { width: 52px; height: 52px; }
+    .fan-blades { transform-origin: 26px 26px; }
+    .fan-spinning-svg { animation: fan-spin linear infinite; }
+    @keyframes fan-spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+
+    /* glow cuando está ON */
+    .fan-glow { filter: drop-shadow(0 0 6px rgba(63,185,80,0.7)); }
+    .fan-off   { filter: drop-shadow(0 0 0px transparent); opacity: 0.35; }
+
+    /* ══ CHARTS (compactas) ══ */
+    .chart-card {
+      background: var(--surface);
+      backdrop-filter: var(--blur);
+      -webkit-backdrop-filter: var(--blur);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 14px;
+      box-shadow: var(--shadow), inset 0 1px 0 rgba(255,255,255,0.05);
+      flex-shrink: 0;
+    }
+    .chart-title {
+      font-size: 0.68rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      margin-bottom: 10px;
+    }
+    .chart-wrap { position: relative; height: 130px; }
+
+    /* ══ LOG ══ */
+    .log-card {
+      background: var(--surface);
+      backdrop-filter: var(--blur);
+      -webkit-backdrop-filter: var(--blur);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 11px 13px;
+      box-shadow: var(--shadow);
+      flex-shrink: 0;
+    }
+    .log-title {
+      font-size: 0.68rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      margin-bottom: 8px;
+    }
+    #log {
+      font-family: 'Consolas','Courier New', monospace;
+      font-size: 0.7rem;
+      color: var(--muted);
+      height: 88px;
+      overflow-y: auto;
+      line-height: 1.65;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.08) transparent;
+    }
+    #log .lt { color: rgba(255,255,255,0.2); margin-right: 5px; }
+    #log .lok  { color: var(--green); }
+    #log .lerr { color: var(--red); }
+    #log .linf { color: var(--blue); }
+    #log .lwrn { color: var(--orange); }
+
+    /* ══ FOOTER ══ */
+    footer {
+      font-size: 0.62rem;
+      color: rgba(255,255,255,0.2);
+      text-align: center;
+      padding-bottom: 4px;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ══ CANVAS FLUJO DE VIENTO ══ -->
+<canvas id="wind-canvas"></canvas>
+
+<!-- BADGES — esquina superior derecha, fuera del sidebar -->
+<div class="badges">
+  <div class="badge disconnected" id="badge-broker">
+    <span class="dot"></span>
+    <span id="badge-broker-label">Broker desconectado</span>
+  </div>
+  <div class="badge board-offline" id="badge-board">
+    <span class="dot"></span>
+    <span id="badge-board-label">ESP32 offline</span>
+  </div>
+  <div class="badge" id="badge-alarm">
+    <span class="dot"></span>
+    <span>Sin alarma</span>
+  </div>
+</div>
+
+<div class="sidebar">
+
+
+  <!-- CONFIG -->
+  <div class="cfg">
+    <div class="cfg-row">
+      <label>Broker</label>
+      <input id="cfg-broker" type="text" value="broker.hivemq.com" />
+    </div>
+    <div class="cfg-row">
+      <label>Puerto WS</label>
+      <input id="cfg-port" type="number" value="8884" style="max-width:80px" />
+      <label style="margin-left:8px">Topic</label>
+      <input id="cfg-topic" type="text" value="ems" />
+    </div>
+    <div class="cfg-btns">
+      <button class="btn btn-connect"    id="btn-connect"    onclick="connectMQTT()">Conectar</button>
+      <button class="btn btn-disconnect" id="btn-disconnect" onclick="disconnectMQTT()" disabled>Desconectar</button>
+    </div>
+  </div>
+
+  <!-- ALARM BANNER -->
+  <div class="alarm-banner" id="alarm-banner">
+    ⚠️ <span id="alarm-text">ALARMA: Gas crítico</span>
+  </div>
+
+  <!-- CARD EXTRACTOR (se queda en el sidebar) -->
+  <div class="card card-fan card-sidebar card-offline" id="card-fan">
+    <div class="fan-svg-wrap">
+      <svg class="fan-svg fan-off" id="fan-svg" viewBox="0 0 52 52" xmlns="http://www.w3.org/2000/svg">
+        <!-- Aspas del ventilador -->
+        <g class="fan-blades" id="fan-blades">
+          <!-- Aspa 1 — arriba -->
+          <path d="M26 26 C24 18, 20 10, 26 6 C32 2, 34 10, 30 18 Z" fill="#3fb950" opacity="0.9"/>
+          <!-- Aspa 2 — derecha -->
+          <path d="M26 26 C34 24, 42 20, 46 26 C50 32, 42 34, 34 30 Z" fill="#3fb950" opacity="0.9"/>
+          <!-- Aspa 3 — abajo -->
+          <path d="M26 26 C28 34, 32 42, 26 46 C20 50, 18 42, 22 34 Z" fill="#3fb950" opacity="0.9"/>
+          <!-- Aspa 4 — izquierda -->
+          <path d="M26 26 C18 28, 10 32, 6 26 C2 20, 10 18, 18 22 Z" fill="#3fb950" opacity="0.9"/>
+        </g>
+        <!-- Centro / hub -->
+        <circle cx="26" cy="26" r="5" fill="#0d1117" stroke="#3fb950" stroke-width="1.5"/>
+        <circle cx="26" cy="26" r="2" fill="#3fb950"/>
+      </svg>
+    </div>
+    <div class="card-body">
+      <div class="card-label">Extractor</div>
+      <div class="card-value" id="val-fan" style="color:var(--muted)">OFF</div>
+      <div class="card-sub"  id="sub-fan">PWM: -- %</div>
+    </div>
+  </div>
+
+  <!-- CHART Temp & Hum -->
+  <div class="chart-card">
+    <div class="chart-title">📈 Temperatura &amp; Humedad</div>
+    <div class="chart-wrap"><canvas id="chart-th"></canvas></div>
+  </div>
+
+  <!-- CHART Gas -->
+  <div class="chart-card">
+    <div class="chart-title">📊 Gas MQ-135 (ppm)</div>
+    <div class="chart-wrap"><canvas id="chart-gas"></canvas></div>
+  </div>
+
+  <!-- LOG -->
+  <div class="log-card">
+    <div class="log-title">📋 Registro de eventos</div>
+    <div id="log"></div>
+  </div>
+
+  <footer>Yeison Dénnir Cuastumal · UNAL · Instrumentación Electrónica</footer>
+
+</div><!-- /sidebar -->
+
+<!-- ══ TÍTULO FLOTANTE ══ -->
+<div class="floating-title">
+  <h1>Estación de Monitoreo Ambiental</h1>
+  <p>ESP32-C6 · Instrumentación Electrónica · UNAL 2026</p>
+</div>
+
+<!-- ══ BARRA INFERIOR — 3 cards de sensores ══ -->
+<div class="bottom-bar">
+
+  <!-- TEMPERATURA -->
+  <div class="card card-temp card-offline" id="card-temp">
+    <div class="card-icon-wrap" style="color:var(--orange)">🌡️</div>
+    <div class="card-body">
+      <div class="card-label">Temperatura</div>
+      <div class="card-value" id="val-temp">--<span class="card-unit">°C</span></div>
+      <div class="card-sub"  id="sub-temp">Sin datos</div>
+    </div>
+  </div>
+
+  <!-- HUMEDAD RELATIVA -->
+  <div class="card card-hum card-offline" id="card-hum">
+    <div class="card-icon-wrap" style="color:var(--blue)">💧</div>
+    <div class="card-body">
+      <div class="card-label">Humedad Relativa</div>
+      <div class="card-value" id="val-hum">--<span class="card-unit">%</span></div>
+      <div class="card-sub"  id="sub-hum">Sin datos</div>
+    </div>
+  </div>
+
+  <!-- CALIDAD DE AIRE -->
+  <div class="card card-gas card-offline" id="card-gas">
+    <div class="card-icon-wrap" style="color:var(--purple)">💨</div>
+    <div class="card-body">
+      <div class="card-label">Calidad de Aire · MQ-135</div>
+      <div class="card-value" id="val-gas">--<span class="card-unit">ppm</span></div>
+      <div class="gas-bar-wrap"><div class="gas-bar" id="gas-bar"></div></div>
+      <div class="card-sub" id="sub-gas">Sin datos</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+/* ── Umbrales ── */
+const THRESHOLDS = {
+  gas_warn: 800, gas_danger: 1500, gas_max: 3000,
+  temp_warn: 35, hum_min: 20, hum_max: 85,
+};
+
+const MAX_POINTS = 60;
+const hist = { labels: [], temp: [], hum: [], gas: [] };
+let client = null, boardOnline = false, boardTimer = null;
+
+/* ── Utilidades ── */
+function now() {
+  return new Date().toLocaleTimeString('es-CO', { hour12: false });
+}
+function logMsg(msg, type = 'inf') {
+  const el = document.getElementById('log');
+  const d  = document.createElement('div');
+  d.innerHTML = `<span class="lt">[${now()}]</span><span class="l${type}">${msg}</span>`;
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
+  while (el.children.length > 80) el.removeChild(el.firstChild);
+}
+
+/* ── Chart defaults ── */
+const CD = {
+  responsive: true, maintainAspectRatio: false,
+  animation: { duration: 300 },
+  plugins: { legend: { labels: { color: '#9aa5b1', font: { size: 10 }, boxWidth: 10 } } },
+  scales: {
+    x: { ticks: { color: '#9aa5b1', maxTicksLimit: 6, font: { size: 9 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
+    y: { ticks: { color: '#9aa5b1', font: { size: 9 } }, grid: { color: 'rgba(255,255,255,0.05)' } }
+  }
+};
+
+const chartTH = new Chart(document.getElementById('chart-th'), {
+  type: 'line',
+  data: {
+    labels: hist.labels,
+    datasets: [
+      { label:'Temp °C', data: hist.temp, borderColor:'#d29922', backgroundColor:'rgba(210,153,34,0.07)', tension:0.35, pointRadius:1.5, fill:true, yAxisID:'y' },
+      { label:'Hum %',   data: hist.hum,  borderColor:'#58a6ff', backgroundColor:'rgba(88,166,255,0.07)', tension:0.35, pointRadius:1.5, fill:true, yAxisID:'y1' }
+    ]
+  },
+  options: { ...CD, scales: { ...CD.scales,
+    y:  { ...CD.scales.y },
+    y1: { ...CD.scales.y, position:'right', grid:{ drawOnChartArea:false } }
+  }}
+});
+
+const chartGas = new Chart(document.getElementById('chart-gas'), {
+  type: 'line',
+  data: {
+    labels: hist.labels,
+    datasets: [{ label:'Gas ppm', data: hist.gas, borderColor:'#bc8cff', backgroundColor:'rgba(188,140,255,0.09)', tension:0.35, pointRadius:1.5, fill:true }]
+  },
+  options: CD
+});
+
+function pushHist(temp, hum, gas) {
+  hist.labels.push(now()); hist.temp.push(temp); hist.hum.push(hum); hist.gas.push(gas);
+  if (hist.labels.length > MAX_POINTS) { hist.labels.shift(); hist.temp.shift(); hist.hum.shift(); hist.gas.shift(); }
+  chartTH.update(); chartGas.update();
+}
+
+/* ── Flash ── */
+function flash(id) {
+  const e = document.getElementById(id);
+  e.classList.remove('updated'); void e.offsetWidth; e.classList.add('updated');
+}
+
+/* ── Actualizar cards ── */
+function updateCards(d) {
+  /* Temp */
+  const te = document.getElementById('val-temp');
+  te.innerHTML = `${d.temp.toFixed(1)}<span class="card-unit">°C</span>`;
+  te.style.color = d.temp > THRESHOLDS.temp_warn ? 'var(--red)' : 'var(--orange)';
+  document.getElementById('sub-temp').textContent = d.temp > THRESHOLDS.temp_warn ? '⚠️ Temperatura elevada' : 'Normal';
+  document.getElementById('card-temp').classList.remove('card-offline');
+  flash('val-temp');
+
+  /* Hum */
+  const he = document.getElementById('val-hum');
+  he.innerHTML = `${d.hum.toFixed(1)}<span class="card-unit">%</span>`;
+  const humOk = d.hum >= THRESHOLDS.hum_min && d.hum <= THRESHOLDS.hum_max;
+  he.style.color = humOk ? 'var(--blue)' : 'var(--orange)';
+  document.getElementById('sub-hum').textContent = humOk ? 'Humedad normal' : (d.hum < THRESHOLDS.hum_min ? '⚠️ Muy seco' : '⚠️ Muy húmedo');
+  document.getElementById('card-hum').classList.remove('card-offline');
+  flash('val-hum');
+
+  /* Gas */
+  const ge = document.getElementById('val-gas');
+  const gb = document.getElementById('gas-bar');
+  ge.innerHTML = `${d.gas}<span class="card-unit">ppm</span>`;
+  gb.style.width = Math.min((d.gas / THRESHOLDS.gas_max) * 100, 100) + '%';
+  const gc = document.getElementById('card-gas');
+  if (d.gas >= THRESHOLDS.gas_danger) {
+    ge.style.color = 'var(--red)'; gb.className = 'gas-bar danger'; gc.classList.add('alarm');
+    document.getElementById('sub-gas').textContent = '🚨 NIVEL CRÍTICO';
+    triggerAlarm(true, `Gas: ${d.gas} ppm — umbral crítico superado`);
+  } else if (d.gas >= THRESHOLDS.gas_warn) {
+    ge.style.color = 'var(--orange)'; gb.className = 'gas-bar warning'; gc.classList.remove('alarm');
+    document.getElementById('sub-gas').textContent = '⚠️ Nivel elevado';
+    triggerAlarm(false);
+  } else {
+    ge.style.color = 'var(--purple)'; gb.className = 'gas-bar'; gc.classList.remove('alarm');
+    document.getElementById('sub-gas').textContent = 'Calidad de aire buena';
+    triggerAlarm(false);
+  }
+  gc.classList.remove('card-offline');
+  flash('val-gas');
+
+  /* Fan */
+  const fv      = document.getElementById('val-fan');
+  const fanSvg  = document.getElementById('fan-svg');
+  const fanBlades = document.getElementById('fan-blades');
+  if (d.fan_state) {
+    fv.textContent = 'ON'; fv.style.color = 'var(--green)';
+    /* velocidad: PWM 100% → 0.3s/vuelta, PWM 10% → 2s/vuelta */
+    const dur = Math.max(0.3, 2 - (d.fan_pwm / 100) * 1.7);
+    fanBlades.style.animationDuration = dur + 's';
+    fanBlades.classList.add('fan-spinning-svg');
+    fanSvg.classList.remove('fan-off');
+    fanSvg.classList.add('fan-glow');
+    document.getElementById('sub-fan').textContent = `PWM: ${d.fan_pwm} %`;
+    startWind();
+  } else {
+    fv.textContent = 'OFF'; fv.style.color = 'var(--muted)';
+    fanBlades.classList.remove('fan-spinning-svg');
+    fanSvg.classList.remove('fan-glow');
+    fanSvg.classList.add('fan-off');
+    document.getElementById('sub-fan').textContent = 'Extractor detenido';
+    stopWind();
+  }
+  document.getElementById('card-fan').classList.remove('card-offline');
+  flash('val-fan');
+
+  pushHist(d.temp, d.hum, d.gas);
+}
+
+/* ── Alarma ── */
+function triggerAlarm(active, msg = '') {
+  const b  = document.getElementById('alarm-banner');
+  const ba = document.getElementById('badge-alarm');
+  if (active) {
+    b.classList.add('visible');
+    document.getElementById('alarm-text').textContent = msg;
+    ba.classList.add('alarm-active');
+    ba.querySelector('span:last-child').textContent = 'ALARMA';
+    document.body.classList.add('alarm-state');
+  } else {
+    b.classList.remove('visible');
+    ba.classList.remove('alarm-active');
+    ba.querySelector('span:last-child').textContent = 'Sin alarma';
+    document.body.classList.remove('alarm-state');
+  }
+}
+
+/* ── Estado ESP32 ── */
+function setBoardStatus(online) {
+  boardOnline = online;
+  const badge = document.getElementById('badge-board');
+  const label = document.getElementById('badge-board-label');
+  if (online) {
+    badge.className = 'badge board-online'; label.textContent = 'ESP32 online';
+    logMsg('ESP32-C6 conectado', 'ok');
+  } else {
+    badge.className = 'badge board-offline'; label.textContent = 'ESP32 offline';
+    logMsg('ESP32-C6 desconectado', 'wrn');
+    ['card-temp','card-hum','card-gas','card-fan'].forEach(id =>
+      document.getElementById(id).classList.add('card-offline'));
+  }
+}
+function resetWatchdog() {
+  clearTimeout(boardTimer);
+  boardTimer = setTimeout(() => setBoardStatus(false), 10000);
+}
+
+/* ── MQTT ── */
+function connectMQTT() {
+  const broker = document.getElementById('cfg-broker').value.trim();
+  const port   = parseInt(document.getElementById('cfg-port').value);
+  const root   = document.getElementById('cfg-topic').value.trim();
+  const url    = `wss://${broker}:${port}/mqtt`;
+  const cid    = 'ems-dash-' + Math.random().toString(16).slice(2,8);
+
+  logMsg(`Conectando a ${broker}…`, 'inf');
+
+  client = mqtt.connect(url, { clientId: cid, clean: true, connectTimeout: 8000, reconnectPeriod: 3000 });
+
+  client.on('connect', () => {
+    logMsg(`Broker OK (${broker})`, 'ok');
+    document.getElementById('badge-broker').className = 'badge connected';
+    document.getElementById('badge-broker-label').textContent = broker;
+    document.getElementById('btn-connect').disabled = true;
+    document.getElementById('btn-disconnect').disabled = false;
+    client.subscribe(`${root}/data`,   { qos: 0 });
+    client.subscribe(`${root}/status`, { qos: 1 });
+    logMsg(`Suscrito a ${root}/data y ${root}/status`, 'inf');
+  });
+
+  client.on('message', (topic, payload) => {
+    const msg = payload.toString();
+    const t   = topic.split('/').pop();
+    if (t === 'status') { setBoardStatus(msg === 'online'); return; }
+    if (t === 'data') {
+      try {
+        const d = JSON.parse(msg);
+        setBoardStatus(true); resetWatchdog(); updateCards(d);
+        logMsg(`T=${d.temp}°C H=${d.hum}% Gas=${d.gas}ppm Fan=${d.fan_state?'ON':'OFF'}`, 'inf');
+      } catch(e) { logMsg('JSON inválido: '+e.message, 'err'); }
+    }
+  });
+
+  client.on('error',     e  => logMsg('Error: '+e.message, 'err'));
+  client.on('reconnect', () => { logMsg('Reconectando…','wrn'); document.getElementById('badge-broker').className='badge disconnected'; });
+  client.on('close',     () => {
+    logMsg('Conexión cerrada','wrn');
+    document.getElementById('badge-broker').className = 'badge disconnected';
+    document.getElementById('badge-broker-label').textContent = 'Broker desconectado';
+    document.getElementById('btn-connect').disabled  = false;
+    document.getElementById('btn-disconnect').disabled = true;
+    setBoardStatus(false);
+  });
+}
+
+function disconnectMQTT() {
+  if (client) { client.end(true); client = null; logMsg('Desconectado', 'inf'); }
+}
+
+/* ══ SISTEMA DE VIENTO ══ */
+const windCanvas = document.getElementById('wind-canvas');
+const wCtx = windCanvas.getContext('2d');
+let windActive = false;
+let windParticles = [];
+let windRAF = null;
+
+/* Ángulo: cama (superior-izq) → frente (inferior-der) = +30° */
+const WIND_ANGLE = 30 * Math.PI / 180;
+const WIND_DX = Math.cos(WIND_ANGLE);
+const WIND_DY = Math.sin(WIND_ANGLE);
+
+/* ── Polígono del INTERIOR del cuarto (sin las paredes) ──
+   Imagen: 60% ancho viewport, centrada, vertical al 30%.
+   Ratio original: 756/1344 = 0.5625
+   Vértices ajustados al suelo interior (sin incluir paredes):
+     top:   (50%, 12%)   right: (88%, 50%)
+     bottom:(50%, 90%)   left:  (12%, 50%)                        */
+function getRoomPolygon() {
+  const vw   = window.innerWidth;
+  const vh   = window.innerHeight;
+  const imgW = vw * 0.60;
+  const imgH = imgW * (756 / 1344);
+  const imgX = (vw - imgW) / 2;
+  const imgY = Math.max(0, (vh - imgH) * 0.30);
+
+  return [
+    { x: imgX + imgW * 0.50, y: imgY + imgH * 0.16 },  /* top    */
+    { x: imgX + imgW * 0.84, y: imgY + imgH * 0.50 },  /* right  */
+    { x: imgX + imgW * 0.50, y: imgY + imgH * 0.86 },  /* bottom */
+    { x: imgX + imgW * 0.30, y: imgY + imgH * 0.50 },  /* left — hacia el armario */
+  ];
+}
+
+function resizeWindCanvas() {
+  windCanvas.width  = window.innerWidth;
+  windCanvas.height = window.innerHeight;
+}
+resizeWindCanvas();
+window.addEventListener('resize', resizeWindCanvas);
+
+/* Genera una partícula — nace en toda la pared izquierda del cuarto */
+function makeParticle() {
+  const poly = getRoomPolygon();
+  /* Distribuir spawn en todo el borde izquierdo: top→left→bottom */
+  const t  = Math.random();
+  let sx, sy;
+  if (t < 0.5) {
+    /* mitad superior: entre top y left */
+    const u = t / 0.5;
+    sx = poly[0].x + (poly[3].x - poly[0].x) * u;
+    sy = poly[0].y + (poly[3].y - poly[0].y) * u;
+  } else {
+    /* mitad inferior: entre left y bottom */
+    const u = (t - 0.5) / 0.5;
+    sx = poly[3].x + (poly[2].x - poly[3].x) * u;
+    sy = poly[3].y + (poly[2].y - poly[3].y) * u;
+  }
+  /* Desplazar un poco hacia el interior para no nacer en la pared */
+  const cx = (poly[0].x + poly[1].x + poly[2].x + poly[3].x) / 4;
+  const cy = (poly[0].y + poly[1].y + poly[2].y + poly[3].y) / 4;
+  const push = 0.05 + Math.random() * 0.15;
+  return {
+    x:        sx + (cx - sx) * push,
+    y:        sy + (cy - sy) * push,
+    len:      45 + Math.random() * 55,       /* longitud de cada segmento de onda */
+    speed:    1.8 + Math.random() * 2.2,
+    life:     0,
+    maxLife:  130 + Math.random() * 110,
+    alpha:    0,
+    width:    0.6 + Math.random() * 1.1,
+    wave:     6 + Math.random() * 10,        /* amplitud de la onda */
+    waveFreq: 0.018 + Math.random() * 0.012, /* frecuencia */
+    phase:    Math.random() * Math.PI * 2,   /* fase inicial */
+  };
+}
+
+function initWindParticles() {
+  windParticles = [];
+  for (let i = 0; i < 8; i++) {
+    const p = makeParticle();
+    p.life = Math.random() * p.maxLife;
+    windParticles.push(p);
+  }
+}
+
+/* Aplica clip path con la forma del rombo antes de dibujar */
+function clipToRoom() {
+  const poly = getRoomPolygon();
+  wCtx.beginPath();
+  wCtx.moveTo(poly[0].x, poly[0].y);
+  poly.slice(1).forEach(p => wCtx.lineTo(p.x, p.y));
+  wCtx.closePath();
+  wCtx.clip();
+}
+
+function drawWind() {
+  wCtx.clearRect(0, 0, windCanvas.width, windCanvas.height);
+  wCtx.save();
+  clipToRoom();                          /* ← recorte al rombo */
+
+  windParticles.forEach((p, i) => {
+    p.life++;
+    p.x += WIND_DX * p.speed;
+    p.y += WIND_DY * p.speed;
+
+    const t = p.life / p.maxLife;
+    p.alpha = (t < 0.18 ? t / 0.18 : t > 0.72 ? (1 - t) / 0.28 : 1) * 0.50;
+
+    /* Dibujar onda sinusoidal a lo largo de la dirección del viento */
+    const STEPS = 28;
+    const totalLen = p.len * 2.2;
+    wCtx.beginPath();
+    for (let s = 0; s <= STEPS; s++) {
+      const frac  = s / STEPS;
+      /* posición base a lo largo del eje del viento (hacia atrás desde posición actual) */
+      const bx = p.x - WIND_DX * totalLen * frac;
+      const by = p.y - WIND_DY * totalLen * frac;
+      /* desplazamiento perpendicular = onda sinusoidal */
+      const wave = Math.sin(frac * Math.PI * 2.5 + p.phase) * p.wave * (1 - frac * 0.4);
+      const px = bx - WIND_DY * wave;
+      const py = by + WIND_DX * wave;
+      s === 0 ? wCtx.moveTo(px, py) : wCtx.lineTo(px, py);
+    }
+    wCtx.strokeStyle = `rgba(180, 225, 255, ${p.alpha})`;
+    wCtx.lineWidth   = p.width;
+    wCtx.lineCap     = 'round';
+    wCtx.lineJoin    = 'round';
+    wCtx.stroke();
+
+    if (p.life >= p.maxLife || p.x > windCanvas.width + 150 || p.y > windCanvas.height + 150) {
+      windParticles[i] = makeParticle();
+    }
+  });
+
+  wCtx.restore();
+  if (windActive) windRAF = requestAnimationFrame(drawWind);
+  else wCtx.clearRect(0, 0, windCanvas.width, windCanvas.height);
+}
+
+function startWind() {
+  if (windActive) return;
+  windActive = true;
+  windCanvas.classList.add('active');
+  initWindParticles();
+  drawWind();
+}
+
+function stopWind() {
+  windActive = false;
+  windCanvas.classList.remove('active');
+  cancelAnimationFrame(windRAF);
+  setTimeout(() => wCtx.clearRect(0, 0, windCanvas.width, windCanvas.height), 1200);
+}
+
+logMsg('Dashboard listo — configura el broker y conecta.', 'inf');
+</script>
+</body>
+</html>

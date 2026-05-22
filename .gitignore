@@ -3,6 +3,9 @@ CLAUDE.md
 .claude/
 .anthropic/
 
+# Secrets (credenciales locales — nunca versionar)
+main/secrets.h
+
 # macOS
 .DS_Store
 .AppleDouble
