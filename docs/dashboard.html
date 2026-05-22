@@ -32,7 +32,7 @@
       overflow: hidden;
     }
     body {
-      background: #00030c url('room-bg.jpg') center 30% / 60% auto no-repeat fixed;
+      background: #00030c url('background.png') center 30% / 60% auto no-repeat fixed;
       color: var(--text);
       font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
       position: relative;
@@ -456,11 +456,11 @@
   <div class="cfg">
     <div class="cfg-row">
       <label>Broker</label>
-      <input id="cfg-broker" type="text" value="broker.hivemq.com" />
+      <input id="cfg-broker" type="text" value="broker.emqx.io" />
     </div>
     <div class="cfg-row">
       <label>Puerto WS</label>
-      <input id="cfg-port" type="number" value="8884" style="max-width:80px" />
+      <input id="cfg-port" type="number" value="8084" style="max-width:80px" />
       <label style="margin-left:8px">Topic</label>
       <input id="cfg-topic" type="text" value="ems" />
     </div>
@@ -572,6 +572,42 @@ const THRESHOLDS = {
   gas_warn: 800, gas_danger: 1500, gas_max: 3000,
   temp_warn: 35, hum_min: 20, hum_max: 85,
 };
+
+/* ── Simulación (hardware: NTC en ADC_CH4 + potenciómetro en ADC_CH1) ──
+   El firmware publica la NTC en el campo 'temp2' con escala LM35 (0..~330).
+   Aquí se remapea a °C realista. La humedad NO tiene sensor: se simula
+   de forma inversa a la temperatura (aire caliente → menor HR). */
+const SIM = {
+  tempInMin: 0,  tempInMax: 200,   /* rango crudo esperado de temp2 (NTC) */
+  tempOutMin: 12, tempOutMax: 42,  /* rango mostrado en °C                 */
+};
+
+function clampN(v, lo, hi) { return Math.min(Math.max(v, lo), hi); }
+function mapN(v, a, b, c, d) { return c + (v - a) * (d - c) / (b - a); }
+
+/* NTC (temp2) → °C remapeado. Si temp2 falta, usa temp. */
+function simTemp(d) {
+  const raw = (typeof d.temp2 === 'number' && d.temp2 > 0) ? d.temp2 : d.temp;
+  return clampN(mapN(raw, SIM.tempInMin, SIM.tempInMax, SIM.tempOutMin, SIM.tempOutMax),
+                SIM.tempOutMin, SIM.tempOutMax);
+}
+
+/* Humedad simulada: inversa a la temperatura, acotada 30–80 % */
+function simHum(tempC) {
+  return clampN(95 - tempC * 1.5, 30, 80);
+}
+
+/* Normaliza el payload del firmware al modelo que consumen las cards */
+function buildView(d) {
+  const t = simTemp(d);
+  return {
+    temp:      t,
+    hum:       (typeof d.hum === 'number' && d.hum > 0) ? d.hum : simHum(t),
+    gas:       d.gas,
+    fan_state: d.fan_state,
+    fan_pwm:   d.fan_pwm,
+  };
+}
 
 const MAX_POINTS = 60;
 const hist = { labels: [], temp: [], hum: [], gas: [] };
@@ -773,9 +809,10 @@ function connectMQTT() {
     if (t === 'status') { setBoardStatus(msg === 'online'); return; }
     if (t === 'data') {
       try {
-        const d = JSON.parse(msg);
-        setBoardStatus(true); resetWatchdog(); updateCards(d);
-        logMsg(`T=${d.temp}°C H=${d.hum}% Gas=${d.gas}ppm Fan=${d.fan_state?'ON':'OFF'}`, 'inf');
+        const raw  = JSON.parse(msg);
+        const view = buildView(raw);
+        setBoardStatus(true); resetWatchdog(); updateCards(view);
+        logMsg(`T=${view.temp.toFixed(1)}°C H=${view.hum.toFixed(0)}% Gas=${view.gas}ppm Fan=${view.fan_state?'ON':'OFF'}`, 'inf');
       } catch(e) { logMsg('JSON inválido: '+e.message, 'err'); }
     }
   });
@@ -810,23 +847,21 @@ const WIND_DY = Math.sin(WIND_ANGLE);
 
 /* ── Polígono del INTERIOR del cuarto (sin las paredes) ──
    Imagen: 60% ancho viewport, centrada, vertical al 30%.
-   Ratio original: 756/1344 = 0.5625
-   Vértices ajustados al suelo interior (sin incluir paredes):
-     top:   (50%, 12%)   right: (88%, 50%)
-     bottom:(50%, 90%)   left:  (12%, 50%)                        */
+   Ratio background.png: 1024/1536 = 0.6667
+   Vértices ajustados al suelo isométrico de la nueva habitación.   */
 function getRoomPolygon() {
   const vw   = window.innerWidth;
   const vh   = window.innerHeight;
   const imgW = vw * 0.60;
-  const imgH = imgW * (756 / 1344);
+  const imgH = imgW * (1024 / 1536);
   const imgX = (vw - imgW) / 2;
   const imgY = Math.max(0, (vh - imgH) * 0.30);
 
   return [
-    { x: imgX + imgW * 0.50, y: imgY + imgH * 0.16 },  /* top    */
-    { x: imgX + imgW * 0.84, y: imgY + imgH * 0.50 },  /* right  */
-    { x: imgX + imgW * 0.50, y: imgY + imgH * 0.86 },  /* bottom */
-    { x: imgX + imgW * 0.30, y: imgY + imgH * 0.50 },  /* left — hacia el armario */
+    { x: imgX + imgW * 0.655, y: imgY + imgH * 0.27 },  /* top    */
+    { x: imgX + imgW * 0.930, y: imgY + imgH * 0.59 },  /* right  */
+    { x: imgX + imgW * 0.630, y: imgY + imgH * 0.87 },  /* bottom */
+    { x: imgX + imgW * 0.360, y: imgY + imgH * 0.51 },  /* left   */
   ];
 }
 
