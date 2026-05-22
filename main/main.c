@@ -35,7 +35,7 @@
 #define MQTT_TOPIC_DATA  "ems/data"                    /* Publicación de sensores  */
 #define MQTT_TOPIC_STATUS "ems/status"                 /* LWT online/offline       */
 #define MQTT_CLIENT_ID   "esp32c6_ems_01"             /* ID único en el broker    */
-#define MQTT_PUBLISH_MS  10000                         /* Intervalo de publicación (ms) */
+#define MQTT_PUBLISH_MS  1000                          /* Intervalo de publicación (ms) */
 
 /* ── Pines GPIO ────────────────────────────────────────────── */
 #define GPIO_DHT22       GPIO_NUM_4    /* One-wire DHT22, pull-up 4.7 kΩ */
@@ -206,7 +206,7 @@ static void adc_init(void)
 
     adc_oneshot_chan_cfg_t chan_config = {              /* Configuración compartida por ambos canales */
         .bitwidth = ADC_BITWIDTH_12,                   /* Resolución 12 bits (0–4095) */
-        .atten    = ADC_ATTEN_DB_11,                   /* Atenuación 11 dB → rango 0–3.3 V */
+        .atten    = ADC_ATTEN_DB_12,                   /* Atenuación 12 dB -> rango 0-3.3 V */
     };
 
     /* Canal 1 (GPIO1) — MQ-135: calidad de aire / gases */
@@ -371,6 +371,7 @@ static esp_err_t wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));       /* Modo estación */
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());                        /* Arrancar WiFi  */
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));           /* Sin modem sleep → MQTT sin latencia */
 
     ESP_LOGI(TAG_WIFI, "Conectando a '%s'...", WIFI_SSID);
 
@@ -501,9 +502,6 @@ static void sensor_control_task(void *pvParameters)
         } else {
             ESP_LOGW(TAG_DHT, "Lectura fallida, conservando último valor");
         }
-
-        /* Pausa breve para estabilizar GPIO antes del ADC */
-        vTaskDelay(pdMS_TO_TICKS(500));
 
         /* ── Leer MQ-135 en ADC1_CH1 (GPIO1) ────────────────── */
         int gas = adc_read_gas();         /* Raw 0–4095            */
