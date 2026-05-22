@@ -34,12 +34,13 @@
 #define MQTT_BROKER_URI  "mqtt://broker.emqx.io:1883"  /* Broker público gratuito */
 #define MQTT_TOPIC_DATA  "ems/data"                    /* Publicación de sensores  */
 #define MQTT_TOPIC_STATUS "ems/status"                 /* LWT online/offline       */
+#define MQTT_TOPIC_CMD   "ems/cmd"                     /* Comandos entrantes        */
 #define MQTT_CLIENT_ID   "esp32c6_ems_01"             /* ID único en el broker    */
 #define MQTT_PUBLISH_MS  1000                          /* Intervalo de publicación (ms) */
 
 /* ── Pines GPIO ────────────────────────────────────────────── */
 #define GPIO_DHT22       GPIO_NUM_4    /* One-wire DHT22, pull-up 4.7 kΩ */
-#define GPIO_FAN_PWM     GPIO_NUM_10   /* Gate MOSFET IRLZ44N (LEDC)     */
+#define GPIO_FAN_PWM     GPIO_NUM_13   /* Gate MOSFET IRLZ44N (LEDC) — LED de prueba */
 #define GPIO_LED_ALARM   GPIO_NUM_11   /* LED rojo de alarma              */
 #define GPIO_BUZZER      GPIO_NUM_12   /* Buzzer activo                   */
 
@@ -88,6 +89,8 @@ typedef struct {
 } sensor_state_t;
 
 static sensor_state_t g_state = {0};  /* Estado global inicializado a cero */
+
+static volatile bool g_emergency_stop = false;  /* Paro de emergencia: fuerza extractor OFF */
 
 /* ── Handles de FreeRTOS ───────────────────────────────────── */
 static EventGroupHandle_t  s_wifi_event_group;  /* Grupo de eventos WiFi */
@@ -407,10 +410,26 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
             /* Publicar mensaje de presencia al conectar */
             esp_mqtt_client_publish(s_mqtt_client, MQTT_TOPIC_STATUS,
                                     "online", 6, 1, 1);  /* QoS 1, retain */
+            /* Suscribirse al topic de comandos (paro de emergencia) */
+            esp_mqtt_client_subscribe(s_mqtt_client, MQTT_TOPIC_CMD, 1);
             break;
 
         case MQTT_EVENT_DISCONNECTED:
             ESP_LOGW(TAG_MQTT, "Desconectado del broker MQTT");
+            break;
+
+        case MQTT_EVENT_DATA:
+            /* Comando entrante: "stop" activa paro, "resume" reanuda control auto */
+            if (event->topic_len == (int) strlen(MQTT_TOPIC_CMD) &&
+                strncmp(event->topic, MQTT_TOPIC_CMD, event->topic_len) == 0) {
+                if (event->data_len == 4 && strncmp(event->data, "stop", 4) == 0) {
+                    g_emergency_stop = true;
+                    ESP_LOGW(TAG_MQTT, "PARO DE EMERGENCIA activado");
+                } else if (event->data_len == 6 && strncmp(event->data, "resume", 6) == 0) {
+                    g_emergency_stop = false;
+                    ESP_LOGI(TAG_MQTT, "Paro de emergencia liberado");
+                }
+            }
             break;
 
         case MQTT_EVENT_PUBLISHED:
@@ -514,7 +533,15 @@ static void sensor_control_task(void *pvParameters)
         ESP_LOGI(TAG_ADC, "LM35 temp=%.1f°C", lm35_temp);
 
         /* ── Lógica ON/OFF con histéresis ──────────────────────── */
-        if (!g_state.fan_on && gas > GAS_THRESHOLD_ON) {
+        if (g_emergency_stop) {
+            /* Paro de emergencia: extractor forzado OFF, ignora control auto */
+            if (g_state.fan_on || g_state.fan_pwm != 0) {
+                g_state.fan_on  = false;
+                g_state.fan_pwm = 0;
+                fan_set_duty(0);
+                ESP_LOGW(TAG_MAIN, "Extractor OFF por PARO DE EMERGENCIA");
+            }
+        } else if (!g_state.fan_on && gas > GAS_THRESHOLD_ON) {
             /* Gas superó umbral → encender extractor al 100% */
             g_state.fan_on  = true;
             g_state.fan_pwm = 1023;              /* Duty máximo (100%)   */
