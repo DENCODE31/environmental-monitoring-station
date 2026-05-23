@@ -1011,13 +1011,15 @@ function connectMQTT() {
     document.getElementById('btn-emergency').disabled = false;
     client.subscribe(`${root}/data`,   { qos: 0 });
     client.subscribe(`${root}/status`, { qos: 1 });
-    logMsg(`Suscrito a ${root}/data y ${root}/status`, 'inf');
+    client.subscribe(`${root}/cmd`,    { qos: 1 });   /* sincroniza el estado del paro entre dispositivos */
+    logMsg(`Suscrito a ${root}/data, ${root}/status y ${root}/cmd`, 'inf');
   });
 
   client.on('message', (topic, payload) => {
     const msg = payload.toString();
     const t   = topic.split('/').pop();
     if (t === 'status') { setBoardStatus(msg === 'online'); return; }
+    if (t === 'cmd')    { applyEmergencyState(msg === 'stop'); return; }
     if (t === 'data') {
       try {
         const raw  = JSON.parse(msg);
@@ -1048,23 +1050,31 @@ function disconnectMQTT() {
 
 /* ── Paro de emergencia: publica stop/resume a ems/cmd ── */
 let emergencyActive = false;
+
+/* Refleja el estado del paro en el botón. Lo llaman tanto el clic local
+   como los mensajes retained de ems/cmd, así todos los clientes quedan sincronizados. */
+function applyEmergencyState(active) {
+  emergencyActive = active;
+  const btn = document.getElementById('btn-emergency');
+  const lbl = document.getElementById('emergency-label');
+  if (active) {
+    btn.classList.add('engaged');
+    lbl.textContent = 'REANUDAR EXTRACTOR';
+  } else {
+    btn.classList.remove('engaged');
+    lbl.textContent = 'PARO DE EMERGENCIA';
+  }
+}
+
 function toggleEmergency() {
   if (!client) { logMsg('Sin broker: no se puede enviar comando', 'err'); return; }
   const root = document.getElementById('cfg-topic').value.trim();
-  const btn  = document.getElementById('btn-emergency');
-  const lbl  = document.getElementById('emergency-label');
-  emergencyActive = !emergencyActive;
-  if (emergencyActive) {
-    client.publish(`${root}/cmd`, 'stop', { qos: 1 });
-    btn.classList.add('engaged');
-    lbl.textContent = 'REANUDAR EXTRACTOR';
-    logMsg('⛔ PARO DE EMERGENCIA enviado — extractor forzado OFF', 'err');
-  } else {
-    client.publish(`${root}/cmd`, 'resume', { qos: 1 });
-    btn.classList.remove('engaged');
-    lbl.textContent = 'PARO DE EMERGENCIA';
-    logMsg('Paro liberado — control automático reanudado', 'ok');
-  }
+  const next = !emergencyActive;
+  /* retain:true → el broker guarda el último estado y lo entrega a clientes nuevos */
+  client.publish(`${root}/cmd`, next ? 'stop' : 'resume', { qos: 1, retain: true });
+  applyEmergencyState(next);
+  logMsg(next ? '⛔ PARO DE EMERGENCIA enviado — extractor forzado OFF'
+              : 'Paro liberado — control automático reanudado', next ? 'err' : 'ok');
 }
 
 /* ══ SISTEMA DE VIENTO ══ */
