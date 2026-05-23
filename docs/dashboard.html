@@ -76,10 +76,11 @@
       top: 0; left: 0;
       width: 360px;
       height: 100vh;
+      height: 100dvh;                   /* iPadOS/Safari: evita que la barra del navegador tape el final */
       overflow-y: auto;
       overflow-x: hidden;
       z-index: 10;
-      padding: 16px 14px 16px 16px;
+      padding: 16px 14px calc(16px + env(safe-area-inset-bottom)) 16px;
       display: flex;
       flex-direction: column;
       gap: 10px;
