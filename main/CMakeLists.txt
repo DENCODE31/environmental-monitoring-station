@@ -12,4 +12,9 @@ idf_component_register(
         esp_driver_ledc
         mqtt
         freertos
+        json
+    EMBED_TXTFILES
+        "certs/aws_root_ca.pem"
+        "certs/aws_device_cert.pem"
+        "certs/aws_device_key.pem"
 )

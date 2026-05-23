@@ -6,6 +6,9 @@ CLAUDE.md
 # Secrets (credenciales locales — nunca versionar)
 main/secrets.h
 
+# Certificados AWS IoT (X.509 — clave privada, nunca versionar)
+main/certs/
+
 # macOS
 .DS_Store
 .AppleDouble
