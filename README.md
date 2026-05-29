@@ -7,65 +7,91 @@
 
 **Universidad Nacional de Colombia · Instrumentación Electrónica · 9° Semestre**
 
-Sistema embebido sobre **ESP32-C6** que mide temperatura, humedad y calidad de aire (gases), y acciona un extractor cuando la concentración de gas supera un umbral. El control parte de una estrategia **ON/OFF** y deja la arquitectura lista para control **PID por PWM** sobre la velocidad del extractor. Desarrollado con el framework **ESP-IDF** y **FreeRTOS**, con visualización local en pantalla OLED e indicadores de alarma.
+Sistema embebido sobre **ESP32-C6** que mide temperatura, humedad y calidad de aire (gases) y acciona un extractor cuando la concentración de gas supera un umbral. El control parte de una estrategia **ON/OFF con histéresis** y deja la arquitectura lista para control **PID por PWM** sobre la velocidad del extractor.
+
+Incluye **aprovisionamiento WiFi por portal cautivo** (sin reflashear para cambiar de red), telemetría a **AWS IoT Core** (MQTT sobre TLS + Device Shadow) y un **dashboard web** alimentado por un broker MQTT público. Desarrollado con **ESP-IDF** y **FreeRTOS**.
+
+---
+
+## Características
+
+- **Portal cautivo de configuración** — el dispositivo levanta un Access Point, escanea las redes disponibles (con nivel de señal), y permite ingresar credenciales WiFi y umbrales desde el navegador. Todo se guarda en NVS: **no hace falta reflashear** ni editar código para cambiar de red.
+- **Configuración persistente en NVS** — redes WiFi (hasta 3, con prioridad), endpoint/thing de AWS y umbrales de temperatura y humo.
+- **Botones de reconfiguración** — botón de arranque (entra al portal) y botón de reset por pulsación larga (borra credenciales y reinicia al portal).
+- **LED RGB de estado** — rojo parpadeando mientras configura/reconecta, azul fijo al conectar.
+- **Telemetría dual** — AWS IoT Core (TLS + Device Shadow para recordar estado tras corte de luz) y broker emqx público para el dashboard en tiempo real.
+- **Control ON/OFF con histéresis** sobre el extractor, con arquitectura PWM (LEDC) lista para PID.
+- **Alarma** — LED rojo + buzzer al superar el umbral crítico de gas o temperatura.
 
 ---
 
 ## Estructura del repositorio
 
-```
+```text
 environmental-monitoring-station/
 ├── main/
-│   ├── main.c              # Punto de entrada (app_main) y lógica de control
-│   └── CMakeLists.txt      # Registro del componente principal
-├── CMakeLists.txt          # Proyecto ESP-IDF
-├── .devcontainer/          # Entorno reproducible (ESP-IDF + QEMU)
-├── .vscode/                # Configuración del editor (IntelliSense, OpenOCD)
-└── .clangd                 # Flags del language server
+│   ├── main.c              # app_main, WiFi/STA, MQTT, control y alarma
+│   ├── app_config.c/.h     # Configuración persistente en NVS
+│   ├── provisioning.c/.h    # Portal cautivo (SoftAP + DNS + HTTP + mDNS)
+│   ├── status_led.c/.h     # LED RGB de estado (WS2812)
+│   ├── secrets.h.example   # Plantilla de credenciales (copiar a secrets.h)
+│   ├── idf_component.yml   # Dependencias gestionadas (mdns, led_strip)
+│   └── CMakeLists.txt
+├── docs/                   # Dashboard web (GitHub Pages)
+│   ├── dashboard.html      # Panel en tiempo real (MQTT sobre WebSocket)
+│   └── index.html          # Redirección al dashboard
+├── sdkconfig.defaults      # Configuración reproducible (target, flash, particiones)
+├── CMakeLists.txt
+├── .devcontainer/          # Entorno reproducible
+├── .vscode/                # Configuración del editor
+└── .clangd
 ```
 
 ---
 
-## Descripción funcional
+## Flujo de funcionamiento
 
-El dispositivo ejecuta de forma periódica:
+```text
+Arranque → carga config (NVS)
+  ├── Botón GPIO2 presionado → borra credenciales → PORTAL
+  ├── Sin credenciales         → PORTAL
+  └── Con credenciales          → STA → AWS IoT + emqx → tarea de sensores
 
-1. **Adquisición** — lectura de temperatura y humedad (DHT22) y de concentración de gas (MQ-135 por ADC).
-2. **Decisión** — comparación contra umbrales. Si el gas supera el límite, se activa el extractor.
-3. **Actuación** — control del extractor 12 V mediante MOSFET de potencia (ON/OFF, o PWM en la versión PID).
-4. **Alarma** — LED rojo + buzzer al superar el umbral crítico.
-5. **Visualización** — lecturas y estado del sistema en pantalla OLED y por UART.
-6. **(Opcional)** — envío de telemetría por WiFi (MQTT) aprovechando la conectividad del ESP32-C6.
+Portal cautivo (red "EnvStation-XXXX", http://estacion.local):
+  escanear redes → elegir → contraseña → (avanzado: AWS, umbrales)
+  → guardar en NVS → reiniciar → conecta solo
+
+En operación: mantener botón GPIO18 por 3 s → borra credenciales → portal
+```
 
 ---
 
-## Componentes
+## Componentes de hardware
 
 | Categoría | Componente | Función |
 |-----------|-----------|---------|
-| Sensor ambiental | DHT22 | Temperatura + humedad relativa (protocolo one-wire) |
+| Sensor ambiental | DHT22 | Temperatura + humedad relativa (one-wire) |
 | Sensor de gases | MQ-135 | Calidad de aire: NH₃, NOx, alcohol, benceno, humo, CO₂ aprox. |
-| Actuador | Ventilador / extractor DC 12 V | Renovación de aire bajo condición de alarma |
-| Driver de potencia | MOSFET IRLZ44N + diodo flyback | Conmutación del extractor (lógica 3.3 V, 12 V de carga) |
-| Pantalla | OLED SSD1306 0.96" I2C 128×64 | Interfaz local de lectura |
-| Indicadores | LED estado, LED alarma, buzzer | Señalización visual y audible |
+| Actuador | Ventilador / extractor DC 12 V | Renovación de aire bajo alarma |
+| Driver de potencia | MOSFET IRLZ44N + diodo flyback | Conmutación del extractor (lógica 3.3 V, carga 12 V) |
+| Indicadores | LED RGB onboard, LED alarma, buzzer | Estado de red y alarma |
+| Botones | 2 pulsadores a GND | Provisioning y reset de configuración |
 | Embebido | ESP32-C6 | Control + conectividad (WiFi 6 / BLE 5) |
 
 ---
 
-## Pinout propuesto (ESP32-C6)
-
-> Preliminar — se fija definitivamente al cerrar el bring-up de hardware.
+## Pinout (ESP32-C6)
 
 | Señal | GPIO | Notas |
 |-------|------|-------|
-| DHT22 DATA | GPIO4 | One-wire + pull-up 4.7 kΩ |
-| MQ-135 AOUT | GPIO0 (ADC1_CH0) | Divisor de tensión a rango ADC seguro |
-| OLED SDA / SCL | GPIO5 / GPIO6 | Bus I2C maestro |
-| Extractor (gate MOSFET) | GPIO10 | Salida PWM (LEDC) / ON-OFF |
-| LED alarma | GPIO11 | — |
+| DHT22 DATA / NTC | GPIO4 | One-wire (maqueta) o NTC por ADC1_CH4 (simulación) |
+| MQ-135 AOUT | GPIO1 | ADC1_CH1 |
+| Extractor (gate MOSFET) | GPIO13 | PWM (LEDC) / ON-OFF |
+| LED alarma | GPIO11 | LED rojo |
 | Buzzer | GPIO12 | Activo por nivel |
-| UART debug | GPIO16 / GPIO17 | TX / RX consola |
+| LED RGB de estado | GPIO8 | WS2812 onboard (DevKitC-1) |
+| Botón provisioning | GPIO2 | A GND, pull-up interno. Presionado al arranque → portal |
+| Botón reset config | GPIO18 | A GND, pull-up interno. 3 s en operación → portal |
 
 ---
 
@@ -73,10 +99,10 @@ El dispositivo ejecuta de forma periódica:
 
 | Modo | Descripción |
 |------|-------------|
-| ON/OFF | Umbral fijo de gas → extractor encendido hasta retornar bajo umbral. Mínimo viable. |
-| PID por PWM | Control proporcional-integral-derivativo modulando la velocidad del extractor vía LEDC, según concentración de gas o temperatura. Mejor regulación y menor ruido acústico. |
+| ON/OFF + histéresis | Si el gas supera el umbral de encendido, el extractor arranca al 100 %; se apaga al bajar del umbral inferior (85 % del de encendido). Evita el titileo. Mínimo viable. |
+| PID por PWM | (Fase 2) Control modulando la velocidad del extractor vía LEDC según concentración o temperatura. |
 
-**Conceptos clave:** lectura de sensores con temporización no bloqueante (`esp_timer`), ADC oneshot con `esp_adc`, generación PWM con `LEDC`, máquina de estados de alarma, conmutación de carga inductiva con protección flyback.
+Los umbrales (temperatura en °C y nivel de humo en %) se configuran desde el portal cautivo.
 
 ---
 
@@ -84,28 +110,34 @@ El dispositivo ejecuta de forma periódica:
 
 | Herramienta | Uso |
 |-------------|-----|
-| ESP-IDF v5.x | Framework principal |
-| FreeRTOS | Multitarea y temporización |
-| esp_adc | Lectura analógica del MQ-135 |
+| ESP-IDF v5.5 | Framework principal |
+| FreeRTOS | Multitarea |
+| esp_adc | Lectura del MQ-135 / NTC |
 | LEDC | PWM del extractor |
-| esp-idf-ssd1306 | Driver OLED |
-| esp-mqtt (opcional) | Telemetría IoT |
-| VS Code + ESP-IDF Extension | Entorno de desarrollo |
+| esp_http_server + mdns | Portal cautivo |
+| esp-mqtt + TLS | Telemetría a AWS IoT Core y emqx |
+| led_strip | LED RGB de estado |
 
 ---
 
 ## Compilar y flashear
 
+Requiere [ESP-IDF v5.5+](https://docs.espressif.com/projects/esp-idf/).
+
 ```bash
-# Configurar target
+# 1. Credenciales y certificados (no versionados)
+cp main/secrets.h.example main/secrets.h     # editar endpoint/thing de AWS
+# Colocar los certificados X.509 en main/certs/:
+#   aws_root_ca.pem, aws_device_cert.pem, aws_device_key.pem
+
+# 2. Target (flash y particiones vienen de sdkconfig.defaults)
 idf.py set-target esp32c6
 
-# Configurar parámetros (umbrales, WiFi/MQTT si aplica)
-idf.py menuconfig
-
-# Compilar, flashear y monitorear
+# 3. Compilar, flashear y monitorear
 idf.py -p COM<X> flash monitor
 ```
+
+Primer arranque: el equipo crea la red **EnvStation-XXXX**. Conéctate desde el celular, abre `http://estacion.local` y configura tu red WiFi.
 
 Para salir del monitor: `Ctrl + ]`
 

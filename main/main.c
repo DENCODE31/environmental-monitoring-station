@@ -2,10 +2,11 @@
  *   Estación de Monitoreo Ambiental — Control de Extractor
  * ============================================================
  *   Lee temperatura/humedad (DHT22) y calidad de aire (MQ-135).
- *   Acciona extractor 12V vía MOSFET cuando gas > umbral.
- *   Publica datos cada 10 s por MQTT sobre TLS a AWS IoT Core.
+ *   Acciona extractor 12V vía MOSFET (ON/OFF con histéresis) cuando gas > umbral.
+ *   Credenciales WiFi y umbrales configurables por portal cautivo (sin reflashear).
+ *   Publica datos por MQTT sobre TLS a AWS IoT Core + broker emqx (dashboard web).
  *   Usa Device Shadow clásica para recordar el estado tras corte de luz.
- *   Muestra estado en OLED SSD1306 e indica alarma con LED+buzzer.
+ *   Indica estado de red con LED RGB e indica alarma con LED rojo + buzzer.
  *   Arquitectura lista para PID por PWM (LEDC) en fase 2.
  * ============================================================ */
 
@@ -28,7 +29,9 @@
 #include "esp_netif_sntp.h"               /* Sincronización de hora (TLS requiere reloj válido) */
 #include "cJSON.h"                        /* Parseo del JSON de la Device Shadow */
 #include "rom/ets_sys.h"
-#include "secrets.h"                      /* WIFI_SSID y WIFI_PASS (no versionado) */
+#include "app_config.h"                   /* Configuración persistente en NVS (WiFi/AWS/umbrales) */
+#include "provisioning.h"                 /* Portal cautivo de configuración WiFi */
+#include "status_led.h"                   /* LED RGB de estado (WS2812 onboard) */
 
 /* ── Certificados AWS IoT embebidos en flash (ver main/certs/, no versionados) ──
  * EMBED_TXTFILES los inserta null-terminados → usables como cadenas C.        */
@@ -37,24 +40,37 @@ extern const uint8_t aws_device_cert_pem_start[] asm("_binary_aws_device_cert_pe
 extern const uint8_t aws_device_key_pem_start[]  asm("_binary_aws_device_key_pem_start");
 
 /* ── Credenciales WiFi ─────────────────────────────────────── */
-/* WIFI_SSID y WIFI_PASS se definen en secrets.h (ver secrets.h.example) */
+/* La lista de redes vive en NVS (g_cfg). Se configura por el portal cautivo. */
 #define WIFI_MAX_RETRY 10                 /* Intentos antes de reiniciar */
 
 /* ── AWS IoT Core — MQTT sobre TLS (puerto 8883) ───────────── */
-/* AWS_IOT_ENDPOINT y AWS_THING_NAME se definen en secrets.h (no versionado) */
-#define MQTT_BROKER_URI   "mqtts://" AWS_IOT_ENDPOINT ":8883"  /* TLS + cert X.509 */
+/* Endpoint y thing name se cargan de NVS (g_cfg) y se arman en runtime. */
 #define MQTT_TOPIC_DATA   "ems/data"                   /* Publicación de sensores   */
 #define MQTT_TOPIC_STATUS "ems/status"                 /* LWT online/offline        */
 #define MQTT_TOPIC_CMD    "ems/cmd"                    /* Comandos entrantes        */
-#define MQTT_CLIENT_ID    AWS_THING_NAME               /* ID único = nombre objeto  */
 
 /* ── Device Shadow clásica — recall de estado tras corte de luz ──
  * El ESP32 no guarda estado en flash: al arrancar pregunta a la nube
- * "¿en qué estado estaba?" y se restaura desde el último 'reported'. */
-#define SHADOW_GET          "$aws/things/" AWS_THING_NAME "/shadow/get"
-#define SHADOW_GET_ACCEPTED "$aws/things/" AWS_THING_NAME "/shadow/get/accepted"
-#define SHADOW_UPDATE       "$aws/things/" AWS_THING_NAME "/shadow/update"
-#define SHADOW_DELTA        "$aws/things/" AWS_THING_NAME "/shadow/update/delta"
+ * "¿en qué estado estaba?" y se restaura desde el último 'reported'.
+ * URI, client_id y topics de sombra se construyen en aws_build_endpoints()
+ * a partir del endpoint/thing configurados en NVS.                        */
+static char s_mqtt_uri[160];                           /* mqtts://<endpoint>:8883          */
+static char s_client_id[CFG_THING_LEN];                /* = thing name                     */
+static char s_shadow_get[96];                          /* $aws/things/<thing>/shadow/get    */
+static char s_shadow_get_accepted[112];                /* .../shadow/get/accepted           */
+static char s_shadow_update[96];                       /* .../shadow/update                 */
+static char s_shadow_delta[112];                       /* .../shadow/update/delta           */
+
+/* Construye URI MQTT, client_id y topics de sombra desde la config NVS */
+static void aws_build_endpoints(void)
+{
+    snprintf(s_mqtt_uri, sizeof(s_mqtt_uri), "mqtts://%s:8883", g_cfg.aws_endpoint);
+    strlcpy(s_client_id, g_cfg.aws_thing, sizeof(s_client_id));
+    snprintf(s_shadow_get,          sizeof(s_shadow_get),          "$aws/things/%s/shadow/get",              g_cfg.aws_thing);
+    snprintf(s_shadow_get_accepted, sizeof(s_shadow_get_accepted), "$aws/things/%s/shadow/get/accepted",     g_cfg.aws_thing);
+    snprintf(s_shadow_update,       sizeof(s_shadow_update),       "$aws/things/%s/shadow/update",           g_cfg.aws_thing);
+    snprintf(s_shadow_delta,        sizeof(s_shadow_delta),        "$aws/things/%s/shadow/update/delta",     g_cfg.aws_thing);
+}
 
 /* ── Broker MQTT secundario (emqx) para el dashboard local ──────
  * AWS IoT = capa segura/almacenamiento; emqx (público, TCP) alimenta
@@ -79,6 +95,15 @@ extern const uint8_t aws_device_key_pem_start[]  asm("_binary_aws_device_key_pem
 #define GPIO_LED_ALARM   GPIO_NUM_11   /* LED rojo de alarma              */
 #define GPIO_BUZZER      GPIO_NUM_12   /* Buzzer activo                   */
 
+/* ── Botones de configuración (activos en bajo, pull-up interno) ──
+ * GPIO2:  botón externo a GND. Presionado al arranque → borra credenciales
+ *         y entra al portal cautivo.
+ * GPIO18: botón externo a GND. Mantenido 3 s en operación normal → borra
+ *         credenciales y reinicia al portal.                              */
+#define GPIO_BTN_PROV    GPIO_NUM_2    /* Botón de provisioning (arranque) */
+#define GPIO_BTN_RESET   GPIO_NUM_18   /* Botón de reset config (runtime)  */
+#define BTN_LONGPRESS_MS 3000          /* Tiempo de pulsación larga (ms)   */
+
 /* ── ADC1: MQ-135 en canal 1 (GPIO1), NTC en canal 4 (GPIO4) ── */
 #define ADC_CH_GAS       ADC_CHANNEL_1  /* GPIO1 — MQ-135 / potenciómetro (gas) */
 #define ADC_CH_TEMP      ADC_CHANNEL_4  /* GPIO4 — NTC simulación (campo temp2) */
@@ -94,9 +119,8 @@ extern const uint8_t aws_device_key_pem_start[]  asm("_binary_aws_device_key_pem
 #define LEDC_FREQ_HZ     25000              /* 25 kHz, inaudible      */
 
 /* ── Umbrales de alarma ────────────────────────────────────── */
-#define GAS_THRESHOLD_ON   1800   /* ADC raw — enciende extractor */
-#define GAS_THRESHOLD_OFF  1400   /* Histéresis — apaga extractor */
-#define TEMP_ALARM_C       35.0f  /* Temperatura crítica (°C)     */
+/* Configurables en campo desde el portal cautivo. Se leen de g_cfg:
+ * g_cfg.gas_on (enciende), g_cfg.gas_off (histéresis), g_cfg.temp_alarm (°C). */
 
 /* ── DHT22: timing (µs) ────────────────────────────────────── */
 #define DHT22_START_LOW_US   1100  /* Pulso inicio host → sensor  */
@@ -107,8 +131,10 @@ extern const uint8_t aws_device_key_pem_start[]  asm("_binary_aws_device_key_pem
 static const char *TAG_MAIN  = "EMS";
 static const char *TAG_WIFI  = "WIFI";
 static const char *TAG_MQTT  = "MQTT";
-static const char *TAG_DHT   = "DHT22";
 static const char *TAG_ADC   = "ADC";
+#if !USE_NTC_SIM
+static const char *TAG_DHT   = "DHT22";   /* Solo en modo maqueta (DHT22 real) */
+#endif
 
 /* ── Estado global compartido entre tareas ─────────────────── */
 typedef struct {
@@ -359,14 +385,63 @@ static void alarm_set(bool active)
 
 
 /* ════════════════════════════════════════════════════════════
+ *   BOTONES — provisioning (GPIO2 al arranque) y reset (BOOT runtime)
+ * ════════════════════════════════════════════════════════════ */
+
+/* Configura ambos botones como entradas con pull-up (activos en bajo) */
+static void buttons_init(void)
+{
+    gpio_config_t io = {
+        .pin_bit_mask = (1ULL << GPIO_BTN_PROV) | (1ULL << GPIO_BTN_RESET),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,    /* Sin botón → lee alto (no presionado) */
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&io));
+}
+
+/* Lee el botón externo de provisioning con anti-rebote (30 ms) */
+static bool button_prov_pressed(void)
+{
+    if (gpio_get_level(GPIO_BTN_PROV) != 0) return false;  /* No presionado */
+    vTaskDelay(pdMS_TO_TICKS(30));                          /* Confirmar rebote */
+    return gpio_get_level(GPIO_BTN_PROV) == 0;
+}
+
+/* Tarea: vigila el botón de reset en operación normal. Mantenerlo
+ * BTN_LONGPRESS_MS borra las credenciales y reinicia al portal. */
+static void factory_button_task(void *pvParameters)
+{
+    int held_ms = 0;
+    while (1) {
+        if (gpio_get_level(GPIO_BTN_RESET) == 0) {    /* Presionado (activo bajo) */
+            held_ms += 100;
+            if (held_ms >= BTN_LONGPRESS_MS) {
+                ESP_LOGW(TAG_MAIN, "Botón reset %d s — borrando credenciales y reiniciando al portal",
+                         BTN_LONGPRESS_MS / 1000);
+                /* Feedback: 3 parpadeos LED + buzzer para confirmar */
+                for (int i = 0; i < 3; i++) {
+                    alarm_set(true);  vTaskDelay(pdMS_TO_TICKS(80));
+                    alarm_set(false); vTaskDelay(pdMS_TO_TICKS(80));
+                }
+                app_config_factory_reset();
+                esp_restart();
+            }
+        } else {
+            held_ms = 0;                              /* Soltó antes de tiempo → reset */
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+
+/* ════════════════════════════════════════════════════════════
  *   WIFI — conexión con reconexión automática y multi-red
  * ════════════════════════════════════════════════════════════ */
 
-/* Redes conocidas (desde secrets.h). El firmware escanea y elige la
- * primera disponible según el orden de la lista (prioridad).         */
-typedef struct { const char *ssid; const char *pass; } wifi_ap_t;
-static const wifi_ap_t s_wifi_aps[] = WIFI_AP_LIST;
-#define WIFI_AP_COUNT (sizeof(s_wifi_aps) / sizeof(s_wifi_aps[0]))
+/* Redes conocidas en g_cfg (NVS). El firmware escanea y elige la primera
+ * disponible según el orden de la lista (prioridad).                       */
 
 /* Escanea el aire, elige la primera red conocida presente, fija sus
  * credenciales y lanza la conexión. Retorna ESP_OK si encontró una. */
@@ -390,9 +465,9 @@ static esp_err_t wifi_connect_best_ap(void)
 
     /* Primera red conocida presente, respetando el orden de prioridad */
     int chosen = -1;
-    for (int i = 0; i < (int) WIFI_AP_COUNT && chosen < 0; i++) {
+    for (int i = 0; i < g_cfg.ap_count && chosen < 0; i++) {
         for (int j = 0; j < ap_num; j++) {
-            if (strcmp((char *) recs[j].ssid, s_wifi_aps[i].ssid) == 0) {
+            if (strcmp((char *) recs[j].ssid, g_cfg.aps[i].ssid) == 0) {
                 chosen = i;
                 break;
             }
@@ -406,12 +481,14 @@ static esp_err_t wifi_connect_best_ap(void)
     }
 
     wifi_config_t cfg = { 0 };
-    strlcpy((char *) cfg.sta.ssid,     s_wifi_aps[chosen].ssid, sizeof(cfg.sta.ssid));
-    strlcpy((char *) cfg.sta.password, s_wifi_aps[chosen].pass, sizeof(cfg.sta.password));
-    cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    strlcpy((char *) cfg.sta.ssid,     g_cfg.aps[chosen].ssid, sizeof(cfg.sta.ssid));
+    strlcpy((char *) cfg.sta.password, g_cfg.aps[chosen].pass, sizeof(cfg.sta.password));
+    /* Red abierta si no hay contraseña; si no, exigir al menos WPA2 */
+    cfg.sta.threshold.authmode = g_cfg.aps[chosen].pass[0]
+                               ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
 
-    ESP_LOGI(TAG_WIFI, "Red elegida: '%s' — conectando...", s_wifi_aps[chosen].ssid);
+    ESP_LOGI(TAG_WIFI, "Red elegida: '%s' — conectando...", g_cfg.aps[chosen].ssid);
     esp_wifi_connect();
     return ESP_OK;
 }
@@ -424,6 +501,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         /* La conexión la dispara wifi_connect_best_ap() tras escanear */
 
     } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        status_led_set(LED_ST_CONFIG);      /* Rojo parpadeando mientras reconecta */
         if (s_retry_num < WIFI_MAX_RETRY) {
             esp_wifi_connect();             /* Reintentar conexión  */
             s_retry_num++;
@@ -437,6 +515,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         ip_event_got_ip_t *event = (ip_event_got_ip_t *) data;
         ESP_LOGI(TAG_WIFI, "IP obtenida: " IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;                                              /* Reset contador */
+        status_led_set(LED_ST_CONNECTED);                            /* Azul fijo: conectado */
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);  /* Señalizar éxito */
     }
 }
@@ -545,14 +624,14 @@ static void shadow_report(void)
         g_emergency_stop ? "true" : "false",
         g_state.fan_on   ? "true" : "false",
         g_state.gas_raw);
-    esp_mqtt_client_publish(s_mqtt_client, SHADOW_UPDATE, payload, len, 1, 0);  /* QoS 1 */
+    esp_mqtt_client_publish(s_mqtt_client, s_shadow_update, payload, len, 1, 0);  /* QoS 1 */
     ESP_LOGI(TAG_MQTT, "Sombra → reported: %s", payload);
 }
 
 /* Pide a AWS el último estado guardado (publica vacío a shadow/get) */
 static void shadow_request_get(void)
 {
-    esp_mqtt_client_publish(s_mqtt_client, SHADOW_GET, "", 0, 1, 0);
+    esp_mqtt_client_publish(s_mqtt_client, s_shadow_get, "", 0, 1, 0);
     ESP_LOGI(TAG_MQTT, "Sombra → solicitando estado guardado (get)");
 }
 
@@ -614,8 +693,8 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
             /* Suscribirse al topic de comandos (paro de emergencia) */
             esp_mqtt_client_subscribe(s_mqtt_client, MQTT_TOPIC_CMD, 1);
             /* Suscribirse a las respuestas de la sombra */
-            esp_mqtt_client_subscribe(s_mqtt_client, SHADOW_GET_ACCEPTED, 1);
-            esp_mqtt_client_subscribe(s_mqtt_client, SHADOW_DELTA, 1);
+            esp_mqtt_client_subscribe(s_mqtt_client, s_shadow_get_accepted, 1);
+            esp_mqtt_client_subscribe(s_mqtt_client, s_shadow_delta, 1);
             /* Pedir el último estado guardado → recall tras corte de luz */
             shadow_request_get();
             break;
@@ -637,10 +716,10 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                     ESP_LOGI(TAG_MQTT, "Paro de emergencia liberado");
                     shadow_report();   /* Persistir el cambio en la sombra */
                 }
-            } else if (mqtt_topic_is(event, SHADOW_GET_ACCEPTED)) {
+            } else if (mqtt_topic_is(event, s_shadow_get_accepted)) {
                 /* Respuesta con el último estado guardado → restaurar */
                 shadow_apply_reported(event->data, event->data_len);
-            } else if (mqtt_topic_is(event, SHADOW_DELTA)) {
+            } else if (mqtt_topic_is(event, s_shadow_delta)) {
                 /* Cambio remoto del estado deseado → aplicar */
                 shadow_apply_delta(event->data, event->data_len);
             }
@@ -665,10 +744,10 @@ static void mqtt_init(void)
     /* TLS mutuo: el broker valida el cert del dispositivo y viceversa.
      * LWT: publicar "offline" si el dispositivo se desconecta inesperadamente. */
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri     = MQTT_BROKER_URI,   /* mqtts://...:8883        */
+        .broker.address.uri     = s_mqtt_uri,        /* mqtts://<endpoint>:8883 */
         .broker.verification.certificate =           /* Root CA → valida al broker */
             (const char *) aws_root_ca_pem_start,
-        .credentials.client_id  = MQTT_CLIENT_ID,    /* ID único = nombre objeto */
+        .credentials.client_id  = s_client_id,       /* ID único = nombre objeto */
         .credentials.authentication.certificate =    /* Cert del dispositivo    */
             (const char *) aws_device_cert_pem_start,
         .credentials.authentication.key =            /* Clave privada           */
@@ -688,7 +767,7 @@ static void mqtt_init(void)
         s_mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL));
     ESP_ERROR_CHECK(esp_mqtt_client_start(s_mqtt_client));  /* Iniciar cliente */
 
-    ESP_LOGI(TAG_MQTT, "Cliente MQTT iniciado → %s", MQTT_BROKER_URI);
+    ESP_LOGI(TAG_MQTT, "Cliente MQTT iniciado → %s", s_mqtt_uri);
 }
 
 /* Handler del cliente emqx (broker secundario para el dashboard) */
@@ -830,28 +909,28 @@ static void sensor_control_task(void *pvParameters)
                 fan_set_duty(0);
                 ESP_LOGW(TAG_MAIN, "Extractor OFF por PARO DE EMERGENCIA");
             }
-        } else if (!g_state.fan_on && gas > GAS_THRESHOLD_ON) {
+        } else if (!g_state.fan_on && gas > g_cfg.gas_on) {
             /* Gas superó umbral → encender extractor al 100% */
             g_state.fan_on  = true;
             g_state.fan_pwm = 1023;              /* Duty máximo (100%)   */
             fan_set_duty(g_state.fan_pwm);        /* Aplicar PWM          */
             ESP_LOGW(TAG_MAIN, "Extractor ON — gas=%d > umbral=%d",
-                     gas, GAS_THRESHOLD_ON);
+                     gas, g_cfg.gas_on);
             shadow_report();                      /* Reflejar cambio en la sombra */
 
-        } else if (g_state.fan_on && gas < GAS_THRESHOLD_OFF) {
+        } else if (g_state.fan_on && gas < g_cfg.gas_off) {
             /* Gas bajó del umbral inferior → apagar extractor */
             g_state.fan_on  = false;
             g_state.fan_pwm = 0;                 /* Duty 0% (apagado)    */
             fan_set_duty(0);                      /* Apagar PWM           */
             ESP_LOGI(TAG_MAIN, "Extractor OFF — gas=%d < umbral_off=%d",
-                     gas, GAS_THRESHOLD_OFF);
+                     gas, g_cfg.gas_off);
             shadow_report();                      /* Reflejar cambio en la sombra */
         }
 
         /* ── Lógica de alarma (gas + temperatura DHT22) ───────── */
-        bool alarm = (gas > GAS_THRESHOLD_ON)
-                  || (g_state.temp_dht > TEMP_ALARM_C);
+        bool alarm = (gas > g_cfg.gas_on)
+                  || (g_state.temp_dht > g_cfg.temp_alarm);
         g_state.alarm_active = alarm;
         alarm_set(alarm);  /* Actualizar LED y buzzer según estado de alarma */
 
@@ -883,10 +962,34 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs_ret);
     ESP_LOGI(TAG_MAIN, "NVS inicializado");
 
+    /* ── Cargar configuración (WiFi, AWS, umbrales) desde NVS ── */
+    app_config_load();
+
     /* ── Inicializar periféricos ────────────────────────────── */
     adc_init();        /* ADC1 para MQ-135          */
     ledc_fan_init();   /* PWM LEDC para extractor   */
     alarm_gpio_init(); /* LED rojo + buzzer activo  */
+    buttons_init();    /* Botones de provisioning   */
+    status_led_init(); /* LED RGB de estado (WS2812) */
+    status_led_set(LED_ST_CONFIG);  /* Rojo parpadeando hasta conectar/configurar */
+
+    /* ── Botón externo presionado al arranque → forzar reconfiguración ── */
+    bool force_portal = button_prov_pressed();
+    if (force_portal) {
+        ESP_LOGW(TAG_MAIN, "Botón de configuración presionado — borrando credenciales");
+        app_config_factory_reset();
+    }
+
+    /* ── Portal cautivo si no hay credenciales o se forzó por botón ──
+     * provisioning_start_blocking() no retorna: al guardar, reinicia
+     * y ese arranque entrará por la rama STA normal.                  */
+    if (force_portal || !app_config_has_wifi()) {
+        ESP_LOGW(TAG_MAIN, "Iniciando portal de configuración");
+        provisioning_start_blocking();
+    }
+
+    /* ── Construir endpoints AWS con la config cargada ────────── */
+    aws_build_endpoints();
 
     /* ── Conectar WiFi ──────────────────────────────────────── */
     esp_err_t wifi_ret = wifi_init_sta();
@@ -912,6 +1015,9 @@ void app_main(void)
         5,                     /* Prioridad media         */
         NULL                   /* Sin handle externo      */
     );
+
+    /* ── Tarea de vigilancia del botón BOOT (re-config en runtime) ── */
+    xTaskCreate(factory_button_task, "btn_factory", 2048, NULL, 4, NULL);
 
     ESP_LOGI(TAG_MAIN, "Sistema iniciado — control cada %d ms, publicando cada %d ms",
              CONTROL_PERIOD_MS, CONTROL_PERIOD_MS * PUBLISH_EVERY_N);

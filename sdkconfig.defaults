@@ -1,0 +1,14 @@
+# Valores base del proyecto (reproducibles en cualquier clon).
+# sdkconfig se regenera a partir de aquí; no se versiona.
+
+# Target
+CONFIG_IDF_TARGET="esp32c6"
+
+# Flash 2 MB
+CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="2MB"
+
+# Tabla de particiones: app grande (~1.5 MB) — el binario con TLS+mDNS+HTTP
+# supera el 1 MB de la tabla single_app por defecto.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+CONFIG_PARTITION_TABLE_FILENAME="partitions_singleapp_large.csv"

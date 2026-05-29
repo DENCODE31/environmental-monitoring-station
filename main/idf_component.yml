@@ -1,0 +1,5 @@
+## Dependencias gestionadas por el IDF Component Manager.
+## mdns provee http://estacion.local en el portal de provisioning.
+dependencies:
+  espressif/mdns: "^1.2.0"
+  espressif/led_strip: "^2.5.5"
