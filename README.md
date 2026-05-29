@@ -95,6 +95,14 @@ En operación: mantener botón GPIO18 por 3 s → borra credenciales → portal
 
 ---
 
+## Diagrama de conexiones
+
+![Diagrama de conexiones](docs/diagrama_conexiones.png)
+
+> Fuente vectorial editable: [`docs/diagrama_conexiones.svg`](docs/diagrama_conexiones.svg)
+
+---
+
 ## Estrategia de control
 
 | Modo | Descripción |
