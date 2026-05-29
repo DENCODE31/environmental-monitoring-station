@@ -94,45 +94,47 @@
   <!-- =========================================================
        CABLEADO (debajo de las tarjetas)
   ========================================================== -->
-  <g fill="none" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
+  <g fill="none" stroke-width="3.5" stroke-linecap="square" stroke-linejoin="miter">
     <!-- DHT22 VCC → 3V3 -->
-    <path d="M300 200 C 400 200, 470 190, 596 190" stroke="#e11d48"/>
+    <path d="M300 200 H588 V190 H598" stroke="#e11d48"/>
     <!-- DHT22 DATA → IO4 -->
-    <path d="M300 216 C 420 216, 480 316, 596 316" stroke="#16a34a"/>
+    <path d="M300 216 H580 V316 H598" stroke="#16a34a"/>
     <!-- DHT22 GND → riel -->
-    <path d="M300 232 C 150 232, 120 248, 49 274" stroke="#111827"/>
+    <path d="M300 232 H44" stroke="#111827"/>
     <!-- MQ VCC → 5V -->
-    <path d="M300 360 C 480 360, 470 778, 596 778" stroke="#f97316"/>
+    <path d="M300 360 H564 V778 H598" stroke="#f97316"/>
     <!-- MQ GND → riel -->
-    <path d="M300 376 C 130 376, 110 392, 49 408" stroke="#111827"/>
+    <path d="M300 376 H44" stroke="#111827"/>
     <!-- MQ AOUT → IO1 -->
-    <path d="M300 392 C 470 392, 480 526, 596 526" stroke="#0d9488"/>
+    <path d="M300 392 H572 V526 H598" stroke="#0d9488"/>
     <!-- LED A → IO11 -->
-    <path d="M300 470 C 520 470, 500 652, 596 652" stroke="#7c3aed"/>
+    <path d="M300 470 H558 V652 H598" stroke="#7c3aed"/>
     <!-- LED K → riel -->
-    <path d="M300 492 C 120 506, 100 520, 49 534" stroke="#111827"/>
+    <path d="M300 492 H44" stroke="#111827"/>
     <!-- Buzzer + → IO12 -->
-    <path d="M300 568 C 520 568, 500 694, 596 694" stroke="#7c3aed"/>
+    <path d="M300 568 H552 V694 H598" stroke="#7c3aed"/>
     <!-- Buzzer − → riel -->
-    <path d="M300 590 C 120 604, 100 618, 49 632" stroke="#111827"/>
+    <path d="M300 590 H44" stroke="#111827"/>
+    <!-- GND placa (izq) → riel -->
+    <path d="M604 274 H44" stroke="#111827"/>
     <!-- Gate → IO13 -->
-    <path d="M168 838 C 168 760, 540 736, 596 736" stroke="#7c3aed"/>
+    <path d="M168 858 V908 H584 V736 H598" stroke="#7c3aed"/>
     <!-- Source → riel -->
-    <path d="M212 838 C 212 905, 70 905, 49 905" stroke="#111827"/>
+    <path d="M212 858 V905 H44" stroke="#111827"/>
     <!-- Drain → Fan(−) -->
-    <path d="M190 838 C 190 895, 320 880, 345 822" stroke="#475569" stroke-width="3"/>
+    <path d="M190 858 V846 H365 V824" stroke="#475569" stroke-width="3"/>
     <!-- Fan(+) → +12V -->
-    <path d="M365 742 C 250 720, 250 860, 300 872" stroke="#dc2626" stroke-width="4.5"/>
+    <path d="M365 740 V716 H310 V858" stroke="#dc2626" stroke-width="4.5"/>
     <!-- 12V GND → riel -->
-    <path d="M300 896 C 110 905, 80 905, 49 905" stroke="#111827"/>
+    <path d="M440 858 V910 H44" stroke="#111827"/>
     <!-- Btn PROV → IO2 -->
-    <path d="M974 192 C 870 192, 850 237, 770 237" stroke="#7c3aed"/>
+    <path d="M974 192 H880 V237 H768" stroke="#7c3aed"/>
     <!-- Btn PROV GND → board GND der (top) -->
-    <path d="M974 220 C 880 220, 860 195, 770 195" stroke="#111827"/>
+    <path d="M974 220 H892 V195 H768" stroke="#111827"/>
     <!-- Btn RESET → IO18 -->
-    <path d="M974 322 C 860 322, 850 657, 770 657" stroke="#7c3aed"/>
+    <path d="M974 322 H854 V657 H768" stroke="#7c3aed"/>
     <!-- Btn RESET GND → board GND der (bottom) -->
-    <path d="M974 350 C 880 350, 850 741, 770 741" stroke="#111827"/>
+    <path d="M974 350 H872 V741 H768" stroke="#111827"/>
   </g>
 
   <!-- =========================================================
