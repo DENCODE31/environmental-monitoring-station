@@ -28,6 +28,8 @@
 #include "esp_adc/adc_oneshot.h"
 #include "mqtt_client.h"
 #include "esp_netif_sntp.h"               /* Sincronización de hora (TLS requiere reloj válido) */
+#include "esp_netif.h"                    /* Para forzar DNS fallback (AWS IoT)  */
+#include "lwip/ip_addr.h"                 /* Helpers IPv4 para esp_netif_dns_info_t */
 #include "cJSON.h"                        /* Parseo del JSON de la Device Shadow */
 #include "rom/ets_sys.h"
 #include "app_config.h"                   /* Configuración persistente en NVS (WiFi/AWS/umbrales) */
@@ -534,6 +536,22 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     } else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *) data;
         ESP_LOGI(TAG_WIFI, "IP obtenida: " IPSTR, IP2STR(&event->ip_info.ip));
+
+        /* Forzar DNS público de respaldo. En redes (hotspots/captive portals)
+         * donde DHCP entrega DNS roto o nulo, esto evita el clásico
+         * `getaddrinfo() returns 202` al resolver pool.ntp.org / AWS IoT.    */
+        esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (sta) {
+            esp_netif_dns_info_t dns_main = {0}, dns_fallback = {0};
+            dns_main.ip.type = ESP_IPADDR_TYPE_V4;
+            dns_main.ip.u_addr.ip4.addr = esp_ip4addr_aton("8.8.8.8");
+            dns_fallback.ip.type = ESP_IPADDR_TYPE_V4;
+            dns_fallback.ip.u_addr.ip4.addr = esp_ip4addr_aton("1.1.1.1");
+            esp_netif_set_dns_info(sta, ESP_NETIF_DNS_MAIN,     &dns_main);
+            esp_netif_set_dns_info(sta, ESP_NETIF_DNS_FALLBACK, &dns_fallback);
+            ESP_LOGI(TAG_WIFI, "DNS forzado a 8.8.8.8 (main) / 1.1.1.1 (fallback)");
+        }
+
         s_retry_num = 0;                                              /* Reset contador */
         status_led_set(LED_ST_CONNECTED);                            /* Azul fijo: conectado */
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);  /* Señalizar éxito */
