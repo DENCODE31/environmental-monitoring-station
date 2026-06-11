@@ -290,7 +290,6 @@
       box-shadow: 0 16px 48px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.10);
     }
     .card-temp { --accent: var(--orange); }
-    .card-hum  { --accent: var(--blue); }
     .card-gas  { --accent: var(--purple); }
     .card-fan  { --accent: var(--green); }
     .card-gas.alarm { --accent: var(--red); border-top-color: var(--red); }
@@ -668,6 +667,32 @@
     </div>
   </div>
 
+  <!-- UMBRALES (editables en vivo via MQTT) -->
+  <div class="cfg" style="margin-top:10px">
+    <div style="font-weight:600;color:#c9d1d9;margin-bottom:8px;font-size:13px">⚙️ Umbrales del sistema</div>
+
+    <div class="cfg-row" style="flex-direction:column;align-items:stretch;gap:4px">
+      <label style="display:flex;justify-content:space-between">
+        <span>Gas (raw ADC)</span>
+        <b id="th-gas-val" style="color:#bc8cff">--</b>
+      </label>
+      <input id="th-gas" type="range" min="100" max="1800" step="10" value="900"
+             style="width:100%;accent-color:#bc8cff" disabled />
+      <small style="color:#6e7681">Limpio ≈ 200-500 · Humo denso ≈ 1800 · Apaga al 85%</small>
+    </div>
+
+    <div class="cfg-row" style="margin-top:8px">
+      <label>Temp alarma (°C)</label>
+      <input id="th-temp" type="number" min="10" max="80" step="0.5" value="35"
+             style="max-width:80px" disabled />
+    </div>
+
+    <div class="cfg-btns" style="margin-top:8px">
+      <button class="btn btn-connect" id="btn-apply-thr" onclick="applyThresholds()" disabled>Aplicar umbrales</button>
+    </div>
+    <div id="th-msg" style="font-size:11px;color:#6e7681;margin-top:4px;min-height:14px"></div>
+  </div>
+
   <!-- ALARM BANNER -->
   <div class="alarm-banner" id="alarm-banner">
     ⚠️ <span id="alarm-text">ALARMA: Gas crítico</span>
@@ -700,15 +725,15 @@
     </div>
   </div>
 
-  <!-- CHART Temp & Hum -->
+  <!-- CHART Temperatura -->
   <div class="chart-card">
-    <div class="chart-title">📈 Temperatura &amp; Humedad</div>
+    <div class="chart-title">📈 Temperatura</div>
     <div class="chart-wrap"><canvas id="chart-th"></canvas></div>
   </div>
 
   <!-- CHART Gas -->
   <div class="chart-card">
-    <div class="chart-title">📊 Gas MQ-135 (ppm)</div>
+    <div class="chart-title">📊 Gas MQ-2 (ppm)</div>
     <div class="chart-wrap"><canvas id="chart-gas"></canvas></div>
   </div>
 
@@ -748,22 +773,11 @@
     <p class="cap-caption" id="sub-temp">Sin datos</p>
   </div>
 
-  <!-- HUMEDAD RELATIVA -->
-  <div class="capsule card-hum card-offline" id="card-hum">
-    <div class="cap-head">
-      <span class="material-symbols-outlined cap-icon">humidity_percentage</span>
-      <span class="cap-label">Relativa</span>
-    </div>
-    <div class="cap-value" id="val-hum">--<span class="card-unit">%</span></div>
-    <div class="cap-bar-wrap"><div class="cap-bar" id="hum-bar"></div></div>
-    <p class="cap-caption" id="sub-hum">Sin datos</p>
-  </div>
-
   <!-- CALIDAD DE AIRE -->
   <div class="capsule card-gas card-offline" id="card-gas">
     <div class="cap-head">
       <span class="material-symbols-outlined cap-icon">air</span>
-      <span class="cap-label">MQ-135 · PPM</span>
+      <span class="cap-label">MQ-2 · PPM</span>
     </div>
     <div class="cap-value" id="val-gas">--<span class="card-unit">ppm</span></div>
     <div class="cap-bar-wrap"><div class="gas-bar" id="gas-bar"></div></div>
@@ -776,39 +790,17 @@
 /* ── Umbrales ── */
 const THRESHOLDS = {
   gas_warn: 800, gas_danger: 1500, gas_max: 3000,
-  temp_warn: 35, hum_min: 20, hum_max: 85,
-};
-
-/* ── Simulación (hardware: NTC en ADC_CH4 + potenciómetro en ADC_CH1) ──
-   El firmware publica la NTC en el campo 'temp2' con escala LM35 (0..~330).
-   Aquí se remapea a °C realista. La humedad NO tiene sensor: se simula
-   de forma inversa a la temperatura (aire caliente → menor HR). */
-const SIM = {
-  tempInMin: 0,  tempInMax: 200,   /* rango crudo esperado de temp2 (NTC) */
-  tempOutMin: 12, tempOutMax: 42,  /* rango mostrado en °C                 */
+  temp_warn: 35, temp_min: 0, temp_max: 50,
 };
 
 function clampN(v, lo, hi) { return Math.min(Math.max(v, lo), hi); }
 function mapN(v, a, b, c, d) { return c + (v - a) * (d - c) / (b - a); }
 
-/* NTC (temp2) → °C remapeado. Si temp2 falta, usa temp. */
-function simTemp(d) {
-  const raw = (typeof d.temp2 === 'number' && d.temp2 > 0) ? d.temp2 : d.temp;
-  return clampN(mapN(raw, SIM.tempInMin, SIM.tempInMax, SIM.tempOutMin, SIM.tempOutMax),
-                SIM.tempOutMin, SIM.tempOutMax);
-}
-
-/* Humedad simulada: inversa a la temperatura, acotada 30–80 % */
-function simHum(tempC) {
-  return clampN(95 - tempC * 1.5, 30, 80);
-}
-
-/* Normaliza el payload del firmware al modelo que consumen las cards */
+/* Normaliza el payload del firmware al modelo que consumen las cards.
+ * Firmware publica: { temp, gas, fan_state, fan_pwm } — sin humedad. */
 function buildView(d) {
-  const t = simTemp(d);
   return {
-    temp:      t,
-    hum:       (typeof d.hum === 'number' && d.hum > 0) ? d.hum : simHum(t),
+    temp:      d.temp,
     gas:       d.gas,
     fan_state: d.fan_state,
     fan_pwm:   d.fan_pwm,
@@ -816,7 +808,7 @@ function buildView(d) {
 }
 
 const MAX_POINTS = 60;
-const hist = { labels: [], temp: [], hum: [], gas: [] };
+const hist = { labels: [], temp: [], gas: [] };
 let client = null, boardOnline = false, boardTimer = null;
 
 /* ── Utilidades ── */
@@ -848,14 +840,10 @@ const chartTH = new Chart(document.getElementById('chart-th'), {
   data: {
     labels: hist.labels,
     datasets: [
-      { label:'Temp °C', data: hist.temp, borderColor:'#d29922', backgroundColor:'rgba(210,153,34,0.07)', tension:0.35, pointRadius:1.5, fill:true, yAxisID:'y' },
-      { label:'Hum %',   data: hist.hum,  borderColor:'#58a6ff', backgroundColor:'rgba(88,166,255,0.07)', tension:0.35, pointRadius:1.5, fill:true, yAxisID:'y1' }
+      { label:'Temp °C', data: hist.temp, borderColor:'#d29922', backgroundColor:'rgba(210,153,34,0.07)', tension:0.35, pointRadius:1.5, fill:true }
     ]
   },
-  options: { ...CD, scales: { ...CD.scales,
-    y:  { ...CD.scales.y },
-    y1: { ...CD.scales.y, position:'right', grid:{ drawOnChartArea:false } }
-  }}
+  options: CD
 });
 
 const chartGas = new Chart(document.getElementById('chart-gas'), {
@@ -867,9 +855,9 @@ const chartGas = new Chart(document.getElementById('chart-gas'), {
   options: CD
 });
 
-function pushHist(temp, hum, gas) {
-  hist.labels.push(now()); hist.temp.push(temp); hist.hum.push(hum); hist.gas.push(gas);
-  if (hist.labels.length > MAX_POINTS) { hist.labels.shift(); hist.temp.shift(); hist.hum.shift(); hist.gas.shift(); }
+function pushHist(temp, gas) {
+  hist.labels.push(now()); hist.temp.push(temp); hist.gas.push(gas);
+  if (hist.labels.length > MAX_POINTS) { hist.labels.shift(); hist.temp.shift(); hist.gas.shift(); }
   chartTH.update(); chartGas.update();
 }
 
@@ -886,20 +874,10 @@ function updateCards(d) {
   te.innerHTML = `${d.temp.toFixed(1)}<span class="card-unit">°C</span>`;
   te.style.color = d.temp > THRESHOLDS.temp_warn ? 'var(--red)' : 'var(--orange)';
   document.getElementById('temp-bar').style.width =
-    clampN(mapN(d.temp, SIM.tempOutMin, SIM.tempOutMax, 0, 100), 0, 100) + '%';
+    clampN(mapN(d.temp, THRESHOLDS.temp_min, THRESHOLDS.temp_max, 0, 100), 0, 100) + '%';
   document.getElementById('sub-temp').textContent = d.temp > THRESHOLDS.temp_warn ? '⚠️ Temperatura elevada' : 'Normal';
   document.getElementById('card-temp').classList.remove('card-offline');
   flash('val-temp');
-
-  /* Hum */
-  const he = document.getElementById('val-hum');
-  he.innerHTML = `${d.hum.toFixed(1)}<span class="card-unit">%</span>`;
-  const humOk = d.hum >= THRESHOLDS.hum_min && d.hum <= THRESHOLDS.hum_max;
-  he.style.color = humOk ? 'var(--blue)' : 'var(--orange)';
-  document.getElementById('hum-bar').style.width = clampN(d.hum, 0, 100) + '%';
-  document.getElementById('sub-hum').textContent = humOk ? 'Humedad normal' : (d.hum < THRESHOLDS.hum_min ? '⚠️ Muy seco' : '⚠️ Muy húmedo');
-  document.getElementById('card-hum').classList.remove('card-offline');
-  flash('val-hum');
 
   /* Gas */
   const ge = document.getElementById('val-gas');
@@ -948,7 +926,7 @@ function updateCards(d) {
   document.getElementById('card-fan').classList.remove('card-offline');
   flash('val-fan');
 
-  pushHist(d.temp, d.hum, d.gas);
+  pushHist(d.temp, d.gas);
 }
 
 /* ── Alarma ── */
@@ -980,7 +958,7 @@ function setBoardStatus(online) {
   } else {
     badge.className = 'badge board-offline'; label.textContent = 'ESP32 offline';
     logMsg('ESP32-C6 desconectado', 'wrn');
-    ['card-temp','card-hum','card-gas','card-fan'].forEach(id =>
+    ['card-temp','card-gas','card-fan'].forEach(id =>
       document.getElementById(id).classList.add('card-offline'));
   }
 }
@@ -1012,7 +990,12 @@ function connectMQTT() {
     client.subscribe(`${root}/data`,   { qos: 0 });
     client.subscribe(`${root}/status`, { qos: 1 });
     client.subscribe(`${root}/cmd`,    { qos: 1 });   /* sincroniza el estado del paro entre dispositivos */
-    logMsg(`Suscrito a ${root}/data, ${root}/status y ${root}/cmd`, 'inf');
+    client.subscribe(`${root}/cfg`,    { qos: 1 });   /* snapshot retenido de umbrales del firmware  */
+    logMsg(`Suscrito a ${root}/data, ${root}/status, ${root}/cmd y ${root}/cfg`, 'inf');
+    /* Habilitar inputs de umbrales (se llenan cuando llegue el primer retain) */
+    document.getElementById('btn-apply-thr').disabled = false;
+    document.getElementById('th-gas').disabled        = false;
+    document.getElementById('th-temp').disabled       = false;
   });
 
   client.on('message', (topic, payload) => {
@@ -1020,12 +1003,13 @@ function connectMQTT() {
     const t   = topic.split('/').pop();
     if (t === 'status') { setBoardStatus(msg === 'online'); return; }
     if (t === 'cmd')    { applyEmergencyState(msg === 'stop'); return; }
+    if (t === 'cfg')    { applyCfgSnapshot(msg); return; }
     if (t === 'data') {
       try {
         const raw  = JSON.parse(msg);
         const view = buildView(raw);
         setBoardStatus(true); resetWatchdog(); updateCards(view);
-        logMsg(`T=${view.temp.toFixed(1)}°C H=${view.hum.toFixed(0)}% Gas=${view.gas}ppm Fan=${view.fan_state?'ON':'OFF'}`, 'inf');
+        logMsg(`T=${view.temp.toFixed(1)}°C Gas=${view.gas} Fan=${view.fan_state?'ON':'OFF'}`, 'inf');
       } catch(e) { logMsg('JSON inválido: '+e.message, 'err'); }
     }
   });
@@ -1040,9 +1024,51 @@ function connectMQTT() {
     document.getElementById('btn-connect').disabled  = false;
     document.getElementById('btn-disconnect').disabled = true;
     document.getElementById('btn-emergency').disabled = true;
+    document.getElementById('btn-apply-thr').disabled = true;
+    document.getElementById('th-gas').disabled        = true;
+    document.getElementById('th-temp').disabled       = true;
     setBoardStatus(false);
   });
 }
+
+/* ── Umbrales: sincroniza inputs con el snapshot del firmware (ems/cfg) ── */
+function applyCfgSnapshot(jsonStr) {
+  try {
+    const c = JSON.parse(jsonStr);
+    if (typeof c.gas_on === 'number') {
+      let v = c.gas_on; if (v < 100) v = 100; if (v > 1800) v = 1800;
+      document.getElementById('th-gas').value      = v;
+      document.getElementById('th-gas-val').textContent = v;
+    }
+    if (typeof c.temp_alarm === 'number') {
+      document.getElementById('th-temp').value = c.temp_alarm;
+    }
+    document.getElementById('th-msg').textContent = `Sincronizado (gas_off=${c.gas_off ?? '?'})`;
+    document.getElementById('th-msg').style.color = '#3fb950';
+  } catch (e) { logMsg('cfg JSON inválido: '+e.message, 'err'); }
+}
+
+/* Publica nuevos umbrales a ems/cfg/set. El firmware persiste a NVS
+ * y republica ems/cfg con retain → todos los dashboards quedan sincronizados. */
+function applyThresholds() {
+  if (!client) { logMsg('Sin broker: no se puede enviar', 'err'); return; }
+  const root = document.getElementById('cfg-topic').value.trim();
+  const gas  = parseInt(document.getElementById('th-gas').value);
+  const temp = parseFloat(document.getElementById('th-temp').value);
+  const body = { gas_on: gas, temp_alarm: temp };
+  client.publish(`${root}/cfg/set`, JSON.stringify(body), { qos: 1, retain: false });
+  document.getElementById('th-msg').textContent = `Enviado: gas_on=${gas} temp=${temp}°C`;
+  document.getElementById('th-msg').style.color = '#d29922';
+  logMsg(`Umbrales solicitados → gas_on=${gas} temp=${temp}`, 'inf');
+}
+
+/* Slider en vivo: actualiza el label numérico */
+document.addEventListener('DOMContentLoaded', () => {
+  const s = document.getElementById('th-gas');
+  s.addEventListener('input', () => {
+    document.getElementById('th-gas-val').textContent = s.value;
+  });
+});
 
 function disconnectMQTT() {
   if (client) { client.end(true); client = null; logMsg('Desconectado', 'inf'); }

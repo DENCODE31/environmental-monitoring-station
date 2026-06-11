@@ -75,14 +75,14 @@
     <!-- Pads DERECHA (x=766) y=195+i*42 -->
     <g text-anchor="end">
       <circle cx="766" cy="195" r="7" fill="url(#gold)"/><text x="752" y="199" font-size="11" font-weight="700" fill="#cbd5e1">GND</text>
-      <circle cx="766" cy="237" r="7" fill="url(#gold)"/><text x="752" y="241" font-size="11" font-weight="700" fill="#c4b5fd">IO2</text>
+      <circle cx="766" cy="237" r="7" fill="url(#gold)"/><text x="752" y="241" font-size="11" fill="#9aa4b2">IO2</text>
       <circle cx="766" cy="279" r="7" fill="url(#gold)"/><text x="752" y="283" font-size="11" fill="#9aa4b2">IO3</text>
       <circle cx="766" cy="321" r="7" fill="url(#gold)"/><text x="752" y="325" font-size="11" fill="#9aa4b2">RX</text>
       <circle cx="766" cy="363" r="7" fill="url(#gold)"/><text x="752" y="367" font-size="11" fill="#9aa4b2">TX</text>
       <circle cx="766" cy="405" r="7" fill="url(#gold)"/><text x="752" y="409" font-size="11" fill="#9aa4b2">IO15</text>
       <circle cx="766" cy="447" r="7" fill="url(#gold)"/><text x="752" y="451" font-size="11" fill="#9aa4b2">IO23</text>
-      <circle cx="766" cy="489" r="7" fill="url(#gold)"/><text x="752" y="493" font-size="11" fill="#9aa4b2">IO22</text>
-      <circle cx="766" cy="531" r="7" fill="url(#gold)"/><text x="752" y="535" font-size="11" fill="#9aa4b2">IO21</text>
+      <circle cx="766" cy="489" r="7" fill="url(#gold)"/><text x="752" y="493" font-size="11" font-weight="700" fill="#c4b5fd">IO22</text>
+      <circle cx="766" cy="531" r="7" fill="url(#gold)"/><text x="752" y="535" font-size="11" font-weight="700" fill="#c4b5fd">IO21</text>
       <circle cx="766" cy="573" r="7" fill="url(#gold)"/><text x="752" y="577" font-size="11" fill="#9aa4b2">IO20</text>
       <circle cx="766" cy="615" r="7" fill="url(#gold)"/><text x="752" y="619" font-size="11" fill="#9aa4b2">IO19</text>
       <circle cx="766" cy="657" r="7" fill="url(#gold)"/><text x="752" y="661" font-size="11" font-weight="700" fill="#c4b5fd">IO18</text>
@@ -111,20 +111,24 @@
     <path d="M300 470 H558 V652 H598" stroke="#7c3aed"/>
     <!-- LED K → riel -->
     <path d="M300 492 H44" stroke="#111827"/>
-    <!-- Buzzer + → IO12 -->
+    <!-- LED OK A → IO12 -->
     <path d="M300 568 H552 V694 H598" stroke="#7c3aed"/>
-    <!-- Buzzer − → riel -->
+    <!-- LED OK K → riel -->
     <path d="M300 590 H44" stroke="#111827"/>
     <!-- GND placa (izq) → riel -->
     <path d="M604 274 H44" stroke="#111827"/>
-    <!-- Btn PROV → IO2 -->
-    <path d="M974 192 H880 V237 H768" stroke="#7c3aed"/>
-    <!-- Btn PROV GND → board GND der (top) -->
-    <path d="M974 220 H892 V195 H768" stroke="#111827"/>
     <!-- Btn RESET → IO18 -->
     <path d="M974 322 H854 V657 H768" stroke="#7c3aed"/>
-    <!-- Btn RESET GND → board GND der (bottom) -->
-    <path d="M974 350 H872 V741 H768" stroke="#111827"/>
+    <!-- Btn RESET → 3V3 (activo en alto, pull-down interno) -->
+    <path d="M974 350 H908 V144 H590 V190 H598" stroke="#e11d48"/>
+    <!-- OLED VCC → 3V3 (cruza por encima del board) -->
+    <path d="M974 170 H780 V128 H580 V190 H598" stroke="#e11d48"/>
+    <!-- OLED GND → GND placa (der-top) -->
+    <path d="M974 200 H880 V195 H768" stroke="#111827"/>
+    <!-- OLED SDA → IO21 -->
+    <path d="M974 230 H890 V531 H768" stroke="#7c3aed"/>
+    <!-- OLED SCL → IO22 -->
+    <path d="M974 255 H898 V489 H768" stroke="#7c3aed"/>
   </g>
 
   <!-- =========================================================
@@ -141,12 +145,12 @@
     <circle cx="300" cy="216" r="5" fill="url(#gold)"/><text x="292" y="220" text-anchor="end" font-size="10" fill="#fff">DATA</text>
     <circle cx="300" cy="232" r="5" fill="url(#gold)"/><text x="292" y="236" text-anchor="end" font-size="10" fill="#fff">GND</text>
   </g>
-  <!-- MQ-135 -->
+  <!-- MQ-2 -->
   <g>
     <rect x="150" y="312" width="150" height="100" rx="10" fill="url(#modblue)" stroke="#1e3a8a"/>
     <circle cx="192" cy="362" r="26" fill="url(#metal)" stroke="#52525b"/>
     <g stroke="#3f3f46" stroke-width="1" fill="none"><circle cx="192" cy="362" r="18"/><circle cx="192" cy="362" r="11"/><line x1="174" y1="362" x2="210" y2="362"/><line x1="192" y1="344" x2="192" y2="380"/></g>
-    <text x="260" y="346" text-anchor="middle" font-size="15" font-weight="800" fill="#fff">MQ-135</text>
+    <text x="260" y="346" text-anchor="middle" font-size="15" font-weight="800" fill="#fff">MQ-2</text>
     <text x="260" y="362" text-anchor="middle" font-size="10" fill="#dbeafe">Gas / humo</text>
     <circle cx="300" cy="360" r="5" fill="url(#gold)"/><text x="292" y="354" text-anchor="end" font-size="10" fill="#fff">VCC</text>
     <circle cx="300" cy="376" r="5" fill="url(#gold)"/><text x="292" y="380" text-anchor="end" font-size="10" fill="#fff">GND</text>
@@ -162,15 +166,15 @@
     <circle cx="300" cy="470" r="5" fill="url(#gold)"/><text x="292" y="464" text-anchor="end" font-size="10" fill="#334155">A</text>
     <circle cx="300" cy="492" r="5" fill="#111827"/><text x="292" y="496" text-anchor="end" font-size="10" fill="#334155">K</text>
   </g>
-  <!-- Buzzer -->
+  <!-- LED estado OK (verde) -->
   <g>
     <rect x="150" y="540" width="150" height="62" rx="10" fill="url(#card)" stroke="#94a3b8"/>
-    <circle cx="188" cy="571" r="19" fill="#18181b" stroke="#3f3f46"/><circle cx="188" cy="571" r="5" fill="#3f3f46"/>
-    <text x="188" y="560" text-anchor="middle" font-size="10" fill="#fbbf24">+</text>
-    <text x="253" y="567" text-anchor="middle" font-size="13" font-weight="700" fill="#0f172a">Buzzer</text>
-    <text x="253" y="583" text-anchor="middle" font-size="10" fill="#64748b">activo</text>
-    <circle cx="300" cy="568" r="5" fill="url(#gold)"/><text x="292" y="562" text-anchor="end" font-size="10" fill="#334155">+</text>
-    <circle cx="300" cy="590" r="5" fill="#111827"/><text x="292" y="594" text-anchor="end" font-size="10" fill="#334155">−</text>
+    <text x="225" y="560" text-anchor="middle" font-size="13" font-weight="700" fill="#15803d">LED estado OK</text>
+    <circle cx="184" cy="582" r="11" fill="#22c55e" stroke="#15803d"/>
+    <path d="M206 582 h8 l5 -7 v14 l5 -7 v14 l5 -7 h8" fill="none" stroke="#0f172a" stroke-width="2"/>
+    <text x="266" y="586" font-size="9" fill="#475569">330Ω</text>
+    <circle cx="300" cy="568" r="5" fill="url(#gold)"/><text x="292" y="562" text-anchor="end" font-size="10" fill="#334155">A</text>
+    <circle cx="300" cy="590" r="5" fill="#111827"/><text x="292" y="594" text-anchor="end" font-size="10" fill="#334155">K</text>
   </g>
   <!-- Etapa de potencia -->
   <g>
@@ -229,50 +233,69 @@
   </g>
 
   <!-- =========================================================
-       TARJETAS — DERECHA (botones)
+       TARJETAS — DERECHA (OLED + botón RESET)
   ========================================================== -->
+  <!-- Pantalla OLED SSD1306 -->
   <g>
-    <rect x="974" y="150" width="160" height="84" rx="10" fill="url(#card)" stroke="#94a3b8"/>
-    <rect x="992" y="172" width="40" height="40" rx="6" fill="#1f2937"/><circle cx="1012" cy="192" r="11" fill="#374151"/>
-    <text x="1085" y="186" text-anchor="middle" font-size="13" font-weight="700" fill="#0f172a">Botón PROV</text>
-    <text x="1085" y="204" text-anchor="middle" font-size="10" fill="#64748b">arranque → portal</text>
-    <circle cx="974" cy="192" r="5" fill="#7c3aed"/><circle cx="974" cy="220" r="5" fill="#111827"/>
+    <!-- Carcasa del módulo -->
+    <rect x="974" y="140" width="170" height="130" rx="10" fill="url(#card)" stroke="#94a3b8"/>
+    <!-- Cristal de la pantalla con preview del render real -->
+    <rect x="1010" y="152" width="128" height="64" rx="2" fill="#0b1220" stroke="#1f2937"/>
+    <g font-family="Consolas, Menlo, monospace" font-size="8" fill="#f8fafc">
+      <text x="1074" y="162" text-anchor="middle" font-weight="700">  MONITOR AMB.</text>
+      <line x1="1014" y1="167" x2="1134" y2="167" stroke="#94a3b8" stroke-width="0.6"/>
+      <text x="1014" y="180">Temp:    24.5C</text>
+      <text x="1014" y="194">Gas:     1234</text>
+      <line x1="1014" y1="200" x2="1134" y2="200" stroke="#94a3b8" stroke-width="0.6"/>
+      <!-- Última línea invertida (estado en alarma simulado) -->
+      <rect x="1010" y="204" width="128" height="12" fill="#f8fafc"/>
+      <text x="1014" y="213" fill="#0b1220" font-weight="700">EXTRAC: ACTIVADO</text>
+    </g>
+    <text x="1074" y="237" text-anchor="middle" font-size="12" font-weight="700" fill="#0f172a">OLED SSD1306</text>
+    <text x="1074" y="252" text-anchor="middle" font-size="9.5" fill="#64748b">128x64  ·  I2C 0x3C</text>
+    <!-- Pines de conexión (borde izquierdo) -->
+    <circle cx="974" cy="170" r="5" fill="url(#gold)"/><text x="985" y="174" font-size="9" fill="#334155">VCC</text>
+    <circle cx="974" cy="200" r="5" fill="#111827"/><text x="985" y="204" font-size="9" fill="#334155">GND</text>
+    <circle cx="974" cy="230" r="5" fill="#7c3aed"/><text x="985" y="234" font-size="9" fill="#334155">SDA</text>
+    <circle cx="974" cy="255" r="5" fill="#7c3aed"/><text x="985" y="259" font-size="9" fill="#334155">SCL</text>
   </g>
   <g>
     <rect x="974" y="280" width="160" height="84" rx="10" fill="url(#card)" stroke="#94a3b8"/>
     <rect x="992" y="302" width="40" height="40" rx="6" fill="#1f2937"/><circle cx="1012" cy="322" r="11" fill="#374151"/>
     <text x="1085" y="316" text-anchor="middle" font-size="13" font-weight="700" fill="#0f172a">Botón RESET</text>
     <text x="1085" y="334" text-anchor="middle" font-size="10" fill="#64748b">3s → borra config</text>
-    <circle cx="974" cy="322" r="5" fill="#7c3aed"/><circle cx="974" cy="350" r="5" fill="#111827"/>
+    <circle cx="974" cy="322" r="5" fill="#7c3aed"/><circle cx="974" cy="350" r="5" fill="#e11d48"/>
   </g>
 
   <!-- ====== Lupa de detalle del módulo ====== -->
   <g>
-    <circle cx="1240" cy="560" r="96" fill="#f8fafc" stroke="#0f172a" stroke-width="3"/>
-    <rect x="1192" y="492" width="96" height="150" rx="8" fill="url(#pcb)"/>
-    <rect x="1204" y="512" width="72" height="84" rx="5" fill="url(#shield)" stroke="#6b7280"/>
-    <g stroke="#caa84a" stroke-width="1.5" fill="none"><path d="M1214 500 h52 v6 h-52 v6 h52"/></g>
-    <text x="1240" y="548" text-anchor="middle" font-size="9" font-weight="700" fill="#374151">ESP32-C6</text>
-    <text x="1240" y="560" text-anchor="middle" font-size="7" fill="#4b5563">WROOM-1</text>
-    <circle cx="1240" cy="586" r="9" fill="none" stroke="#9ca3af"/>
-    <text x="1240" y="678" text-anchor="middle" font-size="11" font-weight="600" fill="#334155">Detalle del módulo</text>
+    <circle cx="1240" cy="620" r="96" fill="#f8fafc" stroke="#0f172a" stroke-width="3"/>
+    <rect x="1192" y="552" width="96" height="150" rx="8" fill="url(#pcb)"/>
+    <rect x="1204" y="572" width="72" height="84" rx="5" fill="url(#shield)" stroke="#6b7280"/>
+    <g stroke="#caa84a" stroke-width="1.5" fill="none"><path d="M1214 560 h52 v6 h-52 v6 h52"/></g>
+    <text x="1240" y="608" text-anchor="middle" font-size="9" font-weight="700" fill="#374151">ESP32-C6</text>
+    <text x="1240" y="620" text-anchor="middle" font-size="7" fill="#4b5563">WROOM-1</text>
+    <circle cx="1240" cy="646" r="9" fill="none" stroke="#9ca3af"/>
+    <text x="1240" y="738" text-anchor="middle" font-size="11" font-weight="600" fill="#334155">Detalle del módulo</text>
   </g>
 
   <!-- =========================================================
        LEYENDA — mapeo de pines (derecha)
   ========================================================== -->
   <g>
-    <rect x="974" y="392" width="380" height="118" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
+    <rect x="974" y="392" width="380" height="138" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
     <text x="990" y="414" font-size="14" font-weight="800" fill="#0f172a">Conexiones</text>
     <g font-size="12" fill="#334155">
-      <circle cx="996" cy="432" r="5" fill="#e11d48"/><text x="1008" y="436">3V3 → DHT22 VCC</text>
-      <circle cx="1180" cy="432" r="5" fill="#f97316"/><text x="1192" y="436">5V → MQ-135 VCC</text>
+      <circle cx="996" cy="432" r="5" fill="#e11d48"/><text x="1008" y="436">3V3 → DHT22 + OLED + Btn RESET</text>
+      <circle cx="1180" cy="432" r="5" fill="#f97316"/><text x="1192" y="436">5V → MQ-2 VCC</text>
       <circle cx="996" cy="452" r="5" fill="#16a34a"/><text x="1008" y="456">IO4 → DHT22 DATA</text>
-      <circle cx="1180" cy="452" r="5" fill="#0d9488"/><text x="1192" y="456">IO1 → MQ-135 AOUT</text>
-      <circle cx="996" cy="472" r="5" fill="#7c3aed"/><text x="1008" y="476">IO11 → LED · IO12 → Buzzer</text>
+      <circle cx="1180" cy="452" r="5" fill="#0d9488"/><text x="1192" y="456">IO1 → MQ-2 AOUT</text>
+      <circle cx="996" cy="472" r="5" fill="#7c3aed"/><text x="1008" y="476">IO11 → LED rojo · IO12 → LED verde</text>
       <circle cx="1180" cy="472" r="5" fill="#7c3aed"/><text x="1192" y="476">IO13 → Gate MOSFET</text>
-      <circle cx="996" cy="492" r="5" fill="#7c3aed"/><text x="1008" y="496">IO2 → Botón PROV · IO18 → RESET</text>
+      <circle cx="996" cy="492" r="5" fill="#7c3aed"/><text x="1008" y="496">IO18 → Botón RESET</text>
       <circle cx="1252" cy="492" r="5" fill="#ef4444"/><text x="1264" y="496">IO8 → RGB</text>
+      <circle cx="996" cy="512" r="5" fill="#7c3aed"/><text x="1008" y="516">IO21 → OLED SDA</text>
+      <circle cx="1180" cy="512" r="5" fill="#7c3aed"/><text x="1192" y="516">IO22 → OLED SCL</text>
     </g>
   </g>
 
@@ -291,6 +314,6 @@
       <rect x="826" y="970" width="24" height="8" fill="#0d9488"/><text x="856" y="978">Analógica</text>
       <rect x="932" y="970" width="24" height="8" fill="#7c3aed"/><text x="962" y="978">Control/Digital</text>
     </g>
-    <text x="446" y="998" font-size="10.5" fill="#b91c1c" font-weight="600">Nota: verificar que tu placa exponga IO1; si no, mover el MQ-135 a IO0 o IO3 (también ADC).</text>
+    <text x="446" y="998" font-size="10.5" fill="#b91c1c" font-weight="600">Nota: verificar que tu placa exponga IO1; si no, mover el MQ-2 a IO0 o IO3 (también ADC).</text>
   </g>
 </svg>
