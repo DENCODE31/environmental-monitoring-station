@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "provisioning.c" "app_config.c" "status_led.c" "main.c"
+    SRCS "oled.c" "provisioning.c" "app_config.c" "status_led.c" "main.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash
@@ -18,6 +18,7 @@ idf_component_register(
         mdns
         lwip
         led_strip
+        ssd1306
     EMBED_TXTFILES
         "certs/aws_root_ca.pem"
         "certs/aws_device_cert.pem"

@@ -2,18 +2,25 @@
  *   status_led — implementación
  * ============================================================ */
 #include "status_led.h"
+#include "board_pins.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "led_strip.h"
 #include "esp_log.h"
 
-#define LED_GPIO   8       /* WS2812 onboard del ESP32-C6-DevKitC-1 */
-#define BLINK_MS   300     /* Periodo de parpadeo en modo CONFIG     */
 #define LED_LEVEL  40      /* Brillo (0–255) — bajo para no encandilar */
 
-static const char *TAG = "LED";
+/* Periodos de parpadeo por estado (medio ciclo, ms) */
+#define BLINK_PORTAL_MS        500   /* Rojo lento  → 1 Hz  */
+#define BLINK_RECONNECT_MS     150   /* Naranja     → 3 Hz  */
+#define BLINK_RESET_HOLD_MS     80   /* Magenta     → ~6 Hz */
+
+static const char         *TAG = "LED";
 static led_strip_handle_t  s_strip;
-static volatile led_state_t s_state = LED_ST_OFF;
+
+/* Estado actual y estado previo (para push/pop durante el RESET_HOLD). */
+static volatile led_state_t s_state       = LED_ST_OFF;
+static volatile led_state_t s_saved_state = LED_ST_OFF;
 
 /* Fija el color del único píxel y refresca */
 static void set_rgb(uint8_t r, uint8_t g, uint8_t b)
@@ -28,11 +35,26 @@ static void led_task(void *pvParameters)
     bool on = false;
     while (1) {
         switch (s_state) {
-            case LED_ST_CONFIG:                 /* Rojo parpadeando */
+
+            case LED_ST_PORTAL:                 /* Rojo lento (1 Hz) */
                 on = !on;
                 if (on) set_rgb(LED_LEVEL, 0, 0);
                 else    led_strip_clear(s_strip);
-                vTaskDelay(pdMS_TO_TICKS(BLINK_MS));
+                vTaskDelay(pdMS_TO_TICKS(BLINK_PORTAL_MS));
+                break;
+
+            case LED_ST_RECONNECTING:           /* Naranja rápido (3 Hz) */
+                on = !on;
+                if (on) set_rgb(LED_LEVEL, LED_LEVEL / 3, 0);
+                else    led_strip_clear(s_strip);
+                vTaskDelay(pdMS_TO_TICKS(BLINK_RECONNECT_MS));
+                break;
+
+            case LED_ST_RESET_HOLD:             /* Magenta pulsando (6 Hz) */
+                on = !on;
+                if (on) set_rgb(LED_LEVEL, 0, LED_LEVEL);
+                else    led_strip_clear(s_strip);
+                vTaskDelay(pdMS_TO_TICKS(BLINK_RESET_HOLD_MS));
                 break;
 
             case LED_ST_CONNECTED:              /* Azul fijo */
@@ -52,7 +74,7 @@ static void led_task(void *pvParameters)
 void status_led_init(void)
 {
     led_strip_config_t strip_config = {
-        .strip_gpio_num   = LED_GPIO,
+        .strip_gpio_num   = PIN_STATUS_LED,
         .max_leds         = 1,
         .led_pixel_format = LED_PIXEL_FORMAT_GRB,   /* WS2812 = orden GRB */
         .led_model        = LED_MODEL_WS2812,
@@ -65,15 +87,26 @@ void status_led_init(void)
         .flags.with_dma    = false,
     };
     if (led_strip_new_rmt_device(&strip_config, &rmt_config, &s_strip) != ESP_OK) {
-        ESP_LOGE(TAG, "No se pudo inicializar el LED WS2812 (GPIO%d)", LED_GPIO);
+        ESP_LOGE(TAG, "No se pudo inicializar el LED WS2812 (GPIO%d)", PIN_STATUS_LED);
         return;
     }
     led_strip_clear(s_strip);
     xTaskCreate(led_task, "status_led", 3072, NULL, 3, NULL);
-    ESP_LOGI(TAG, "LED de estado WS2812 inicializado (GPIO%d)", LED_GPIO);
+    ESP_LOGI(TAG, "LED de estado WS2812 inicializado (GPIO%d)", PIN_STATUS_LED);
 }
 
 void status_led_set(led_state_t st)
 {
     s_state = st;
+}
+
+void status_led_push_state(led_state_t st)
+{
+    s_saved_state = s_state;
+    s_state       = st;
+}
+
+void status_led_pop_state(void)
+{
+    s_state = s_saved_state;
 }

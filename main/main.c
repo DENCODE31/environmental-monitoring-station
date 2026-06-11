@@ -1,12 +1,13 @@
 /* ============================================================
  *   Estación de Monitoreo Ambiental — Control de Extractor
  * ============================================================
- *   Lee temperatura/humedad (DHT22) y calidad de aire (MQ-135).
+ *   Lee temperatura (DHT22) y nivel de gases combustibles (MQ-2).
  *   Acciona extractor 12V vía MOSFET (ON/OFF con histéresis) cuando gas > umbral.
  *   Credenciales WiFi y umbrales configurables por portal cautivo (sin reflashear).
  *   Publica datos por MQTT sobre TLS a AWS IoT Core + broker emqx (dashboard web).
  *   Usa Device Shadow clásica para recordar el estado tras corte de luz.
- *   Indica estado de red con LED RGB e indica alarma con LED rojo + buzzer.
+ *   Indica estado de red con LED RGB, alarma con LED rojo y estado OK con LED verde.
+ *   Muestra Temperatura / Gas / estado del extractor en pantalla OLED SSD1306 (I2C).
  *   Arquitectura lista para PID por PWM (LEDC) en fase 2.
  * ============================================================ */
 
@@ -32,6 +33,8 @@
 #include "app_config.h"                   /* Configuración persistente en NVS (WiFi/AWS/umbrales) */
 #include "provisioning.h"                 /* Portal cautivo de configuración WiFi */
 #include "status_led.h"                   /* LED RGB de estado (WS2812 onboard) */
+#include "board_pins.h"                   /* Mapa físico GPIO/ADC del ESP32-C6  */
+#include "oled.h"                         /* Pantalla SSD1306 (I2C)             */
 
 /* ── Certificados AWS IoT embebidos en flash (ver main/certs/, no versionados) ──
  * EMBED_TXTFILES los inserta null-terminados → usables como cadenas C.        */
@@ -45,9 +48,11 @@ extern const uint8_t aws_device_key_pem_start[]  asm("_binary_aws_device_key_pem
 
 /* ── AWS IoT Core — MQTT sobre TLS (puerto 8883) ───────────── */
 /* Endpoint y thing name se cargan de NVS (g_cfg) y se arman en runtime. */
-#define MQTT_TOPIC_DATA   "ems/data"                   /* Publicación de sensores   */
-#define MQTT_TOPIC_STATUS "ems/status"                 /* LWT online/offline        */
-#define MQTT_TOPIC_CMD    "ems/cmd"                    /* Comandos entrantes        */
+#define MQTT_TOPIC_DATA    "ems/data"                  /* Publicación de sensores   */
+#define MQTT_TOPIC_STATUS  "ems/status"                /* LWT online/offline        */
+#define MQTT_TOPIC_CMD     "ems/cmd"                   /* Comandos entrantes        */
+#define MQTT_TOPIC_CFG     "ems/cfg"                   /* Estado actual de umbrales */
+#define MQTT_TOPIC_CFG_SET "ems/cfg/set"               /* Solicitud de cambio de umbrales */
 
 /* ── Device Shadow clásica — recall de estado tras corte de luz ──
  * El ESP32 no guarda estado en flash: al arrancar pregunta a la nube
@@ -79,9 +84,10 @@ static void aws_build_endpoints(void)
 #define EMQX_CLIENT_ID   "esp32c6_ems_pub"
 
 /* ── Fuente de temperatura ──────────────────────────────────────
- * 1: NTC analógica en GPIO4 (ADC_CH4) → campo temp2 (simulación actual).
- * 0: DHT22 digital en GPIO4 → temp + humedad reales (maqueta final).  */
-#define USE_NTC_SIM  1
+ * 1: NTC analógica en GPIO4 (ADC_CH4) → campo temp2 (simulación).
+ * 0: DHT22 digital en GPIO4 → temp + humedad reales (maqueta final).
+ * Requisito de hardware con DHT22: pull-up 4.7-10 kΩ entre DATA y 3V3. */
+#define USE_NTC_SIM  0
 
 /* ── Cadencia ──────────────────────────────────────────────────
  * Control/sensado cada 1 s (respuesta rápida de seguridad).
@@ -89,24 +95,10 @@ static void aws_build_endpoints(void)
 #define CONTROL_PERIOD_MS 1000
 #define PUBLISH_EVERY_N   10
 
-/* ── Pines GPIO ────────────────────────────────────────────── */
-#define GPIO_DHT22       GPIO_NUM_4    /* One-wire DHT22, pull-up 4.7 kΩ */
-#define GPIO_FAN_PWM     GPIO_NUM_13   /* Gate MOSFET IRLZ44N (LEDC) — LED de prueba */
-#define GPIO_LED_ALARM   GPIO_NUM_11   /* LED rojo de alarma              */
-#define GPIO_BUZZER      GPIO_NUM_12   /* Buzzer activo                   */
-
-/* ── Botones de configuración (activos en bajo, pull-up interno) ──
- * GPIO2:  botón externo a GND. Presionado al arranque → borra credenciales
- *         y entra al portal cautivo.
- * GPIO18: botón externo a GND. Mantenido 3 s en operación normal → borra
- *         credenciales y reinicia al portal.                              */
-#define GPIO_BTN_PROV    GPIO_NUM_2    /* Botón de provisioning (arranque) */
-#define GPIO_BTN_RESET   GPIO_NUM_18   /* Botón de reset config (runtime)  */
+/* ── Pines y canales del MCU ───────────────────────────────
+ * Mapa físico completo en board_pins.h. Acá solo van los
+ * parámetros lógicos asociados al botón de reset.            */
 #define BTN_LONGPRESS_MS 3000          /* Tiempo de pulsación larga (ms)   */
-
-/* ── ADC1: MQ-135 en canal 1 (GPIO1), NTC en canal 4 (GPIO4) ── */
-#define ADC_CH_GAS       ADC_CHANNEL_1  /* GPIO1 — MQ-135 / potenciómetro (gas) */
-#define ADC_CH_TEMP      ADC_CHANNEL_4  /* GPIO4 — NTC simulación (campo temp2) */
 
 /* Escala estilo LM35 que espera el dashboard para temp2 (0..~330) */
 #define NTC_ADC_TO_TEMP2(raw)  ((float)(raw) * 3300.0f / 4095.0f / 10.0f)
@@ -141,7 +133,7 @@ typedef struct {
     float    humidity;       /* Humedad relativa en % — DHT22         */
     float    temp_dht;       /* Temperatura °C — DHT22 (digital)      */
     float    temp2;          /* Temperatura — NTC ADC1_CH4 (campo temp2 del dashboard) */
-    int      gas_raw;        /* ADC raw — MQ-135 ADC1_CH1 (GPIO1)     */
+    int      gas_raw;        /* ADC raw — MQ-2 ADC1_CH1 (GPIO1)     */
     bool     fan_on;         /* Estado del extractor                  */
     uint32_t fan_pwm;        /* Ciclo de trabajo 0–1023               */
     bool     alarm_active;   /* Bandera de alarma                     */
@@ -179,7 +171,7 @@ static int dht22_wait_level(int level, int timeout_us)
 {
     int elapsed = 0;
     /* Sondeo cada ~1 µs hasta detectar el nivel esperado */
-    while (gpio_get_level(GPIO_DHT22) != level) {
+    while (gpio_get_level(PIN_DHT22) != level) {
         if (++elapsed >= timeout_us) {
             return -1;  /* Timeout — sensor no respondió */
         }
@@ -195,12 +187,12 @@ static esp_err_t dht22_read(float *out_temp, float *out_hum)
     uint8_t data[5] = {0};  /* 40 bits: hum_hi, hum_lo, tmp_hi, tmp_lo, cksum */
 
     /* ── 1. Señal de inicio: host baja el pin ≥ 1 ms ───────── */
-    gpio_set_direction(GPIO_DHT22, GPIO_MODE_OUTPUT);
-    gpio_set_level(GPIO_DHT22, 0);
+    gpio_set_direction(PIN_DHT22, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_DHT22, 0);
     ets_delay_us(DHT22_START_LOW_US);           /* Mantiene bajo 1.1 ms */
-    gpio_set_level(GPIO_DHT22, 1);
+    gpio_set_level(PIN_DHT22, 1);
     ets_delay_us(30);                           /* Sube y espera 30 µs  */
-    gpio_set_direction(GPIO_DHT22, GPIO_MODE_INPUT);
+    gpio_set_direction(PIN_DHT22, GPIO_MODE_INPUT);
 
     /* ── 2. Respuesta del sensor: 80 µs bajo + 80 µs alto ──── */
     if (dht22_wait_level(0, 100) < 0) {         /* Espera flanco bajo   */
@@ -261,10 +253,10 @@ static esp_err_t dht22_read(float *out_temp, float *out_hum)
 
 
 /* ════════════════════════════════════════════════════════════
- *   ADC — MQ-135 en ADC1_CH1 (GPIO1)
+ *   ADC — MQ-2 en ADC1_CH1 (GPIO1)
  * ════════════════════════════════════════════════════════════ */
 
-/* Inicializa ADC1: CH1 = MQ-135 (GPIO1) */
+/* Inicializa ADC1: CH1 = MQ-2 (GPIO1) */
 static void adc_init(void)
 {
     adc_oneshot_unit_init_cfg_t init_config = {        /* Configuración base del ADC */
@@ -277,7 +269,7 @@ static void adc_init(void)
         .atten    = ADC_ATTEN_DB_12,                   /* Atenuación 12 dB -> rango 0-3.3 V */
     };
 
-    /* Canal 1 (GPIO1) — MQ-135 / potenciómetro: gas */
+    /* Canal 1 (GPIO1) — MQ-2 / potenciómetro: gas */
     ESP_ERROR_CHECK(adc_oneshot_config_channel(
         s_adc_handle, ADC_CH_GAS, &chan_config));
 
@@ -291,12 +283,12 @@ static void adc_init(void)
 #endif
 }
 
-/* Lee el MQ-135 en ADC1_CH1 (GPIO1). Retorna raw 0–4095. */
+/* Lee el MQ-2 en ADC1_CH1 (GPIO1). Retorna raw 0–4095. */
 static int adc_read_gas(void)
 {
     int raw = 0;
-    ESP_ERROR_CHECK(adc_oneshot_read(s_adc_handle, ADC_CH_GAS, &raw));   /* Lectura MQ-135 */
-    ESP_LOGD(TAG_ADC, "MQ-135 CH1 raw=%d", raw);
+    ESP_ERROR_CHECK(adc_oneshot_read(s_adc_handle, ADC_CH_GAS, &raw));   /* Lectura MQ-2 */
+    ESP_LOGD(TAG_ADC, "MQ-2 CH1 raw=%d", raw);
     return raw;
 }
 
@@ -335,13 +327,13 @@ static void ledc_fan_init(void)
         .channel    = LEDC_CHANNEL,    /* Canal 0                  */
         .timer_sel  = LEDC_TIMER,      /* Asociar al timer 0       */
         .intr_type  = LEDC_INTR_DISABLE,
-        .gpio_num   = GPIO_FAN_PWM,    /* GPIO10 → Gate MOSFET     */
+        .gpio_num   = PIN_FAN_PWM,    /* GPIO10 → Gate MOSFET     */
         .duty       = 0,               /* Arranca en 0% (apagado)  */
         .hpoint     = 0,
     };
     ESP_ERROR_CHECK(ledc_channel_config(&channel_cfg));  /* Aplicar config del canal */
 
-    ESP_LOGI(TAG_MAIN, "LEDC fan PWM inicializado (GPIO%d, %d Hz)", GPIO_FAN_PWM, LEDC_FREQ_HZ);
+    ESP_LOGI(TAG_MAIN, "LEDC fan PWM inicializado (GPIO%d, %d Hz)", PIN_FAN_PWM, LEDC_FREQ_HZ);
 }
 
 /* Establece el ciclo de trabajo del extractor (0–1023) */
@@ -354,73 +346,96 @@ static void fan_set_duty(uint32_t duty)
 
 
 /* ════════════════════════════════════════════════════════════
- *   GPIO — LED de alarma y buzzer
+ *   GPIO — LED rojo de alarma + LED verde de estado normal
  * ════════════════════════════════════════════════════════════ */
 
-/* Configura LED y buzzer como salidas digitales */
+/* Configura ambos LEDs como salidas digitales. Estado inicial:
+ * verde encendido (todo OK), rojo apagado. */
 static void alarm_gpio_init(void)
 {
     gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << GPIO_LED_ALARM) | (1ULL << GPIO_BUZZER), /* Ambos pines */
+        .pin_bit_mask = (1ULL << PIN_LED_ALARM) | (1ULL << PIN_LED_OK),
         .mode         = GPIO_MODE_OUTPUT,      /* Salida digital          */
         .pull_up_en   = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type    = GPIO_INTR_DISABLE,
     };
-    ESP_ERROR_CHECK(gpio_config(&io_conf));  /* Aplicar configuración */
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
 
-    gpio_set_level(GPIO_LED_ALARM, 0);  /* LED apagado al inicio  */
-    gpio_set_level(GPIO_BUZZER, 0);     /* Buzzer apagado al inicio */
+    gpio_set_level(PIN_LED_ALARM, 0);  /* Rojo apagado al inicio */
+    gpio_set_level(PIN_LED_OK,    1);  /* Verde encendido (estado OK por defecto) */
 
-    ESP_LOGI(TAG_MAIN, "GPIO LED (GPIO%d) y buzzer (GPIO%d) inicializados",
-             GPIO_LED_ALARM, GPIO_BUZZER);
+    ESP_LOGI(TAG_MAIN, "LED alarma rojo (GPIO%d) y LED OK verde (GPIO%d) inicializados",
+             PIN_LED_ALARM, PIN_LED_OK);
 }
 
-/* Activa o desactiva la alarma visual y sonora */
+/* Indica estado del sistema: alarma activa enciende rojo y apaga verde;
+ * estado normal enciende verde y apaga rojo. */
 static void alarm_set(bool active)
 {
-    gpio_set_level(GPIO_LED_ALARM, active ? 1 : 0);  /* LED rojo ON/OFF  */
-    gpio_set_level(GPIO_BUZZER,    active ? 1 : 0);  /* Buzzer activo ON/OFF */
+    gpio_set_level(PIN_LED_ALARM, active ? 1 : 0);  /* Rojo: ON en alarma  */
+    gpio_set_level(PIN_LED_OK,    active ? 0 : 1);  /* Verde: ON en normal */
 }
 
 
 /* ════════════════════════════════════════════════════════════
- *   BOTONES — provisioning (GPIO2 al arranque) y reset (BOOT runtime)
+ *   BOTÓN — reset de configuración por long-press en runtime
  * ════════════════════════════════════════════════════════════ */
 
-/* Configura ambos botones como entradas con pull-up (activos en bajo) */
+/* Configura el botón como entrada con pull-down (activo en ALTO).
+ * Hardware: botón conecta 3V3 → GPIO18 cuando se presiona.
+ * Sin pulsar el pull-down interno mantiene la línea en bajo. */
 static void buttons_init(void)
 {
     gpio_config_t io = {
-        .pin_bit_mask = (1ULL << GPIO_BTN_PROV) | (1ULL << GPIO_BTN_RESET),
+        .pin_bit_mask = (1ULL << PIN_BTN_RESET),
         .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_ENABLE,    /* Sin botón → lee alto (no presionado) */
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,   /* Sin botón → lee bajo (no presionado) */
         .intr_type    = GPIO_INTR_DISABLE,
     };
     ESP_ERROR_CHECK(gpio_config(&io));
+    /* Refuerzo del pull-down por si gpio_config no lo fija inmediatamente. */
+    gpio_set_pull_mode(PIN_BTN_RESET, GPIO_PULLDOWN_ONLY);
 }
 
-/* Lee el botón externo de provisioning con anti-rebote (30 ms) */
-static bool button_prov_pressed(void)
-{
-    if (gpio_get_level(GPIO_BTN_PROV) != 0) return false;  /* No presionado */
-    vTaskDelay(pdMS_TO_TICKS(30));                          /* Confirmar rebote */
-    return gpio_get_level(GPIO_BTN_PROV) == 0;
-}
-
-/* Tarea: vigila el botón de reset en operación normal. Mantenerlo
- * BTN_LONGPRESS_MS borra las credenciales y reinicia al portal. */
+/* Tarea: vigila el botón de reset en operación normal. Mientras se
+ * sostiene el botón, el LED RGB pulsa magenta para indicar la cuenta.
+ * Si se libera antes de BTN_LONGPRESS_MS se vuelve al estado anterior;
+ * si se completa el long-press se borran credenciales y se reinicia.   */
 static void factory_button_task(void *pvParameters)
 {
-    int held_ms = 0;
+    int  held_ms     = 0;
+    bool hold_active = false;  /* Indica si ya empujamos RESET_HOLD al LED */
+    int  prev_level  = -1;     /* Para diagnóstico: imprime cada flanco    */
+
+    /* Pausa de estabilización: el pull-up interno tarda un instante en
+     * fijar la línea en alto tras gpio_config. Sin esta espera la primera
+     * lectura puede dar 0 espuriamente y disparar un magenta fantasma.    */
+    vTaskDelay(pdMS_TO_TICKS(300));
+
     while (1) {
-        if (gpio_get_level(GPIO_BTN_RESET) == 0) {    /* Presionado (activo bajo) */
+        int level = gpio_get_level(PIN_BTN_RESET);
+
+        if (level != prev_level) {
+            ESP_LOGI(TAG_MAIN, "RESET btn GPIO%d nivel=%d (%s)",
+                     PIN_BTN_RESET, level,
+                     level == 1 ? "PRESIONADO" : "liberado");
+            prev_level = level;
+        }
+
+        if (level == 1) {                            /* Presionado (activo ALTO, cableado a 3V3) */
+            if (!hold_active) {
+                /* Primer tick presionado: cambiar el RGB a magenta y guardar estado actual */
+                status_led_push_state(LED_ST_RESET_HOLD);
+                hold_active = true;
+            }
             held_ms += 100;
+
             if (held_ms >= BTN_LONGPRESS_MS) {
                 ESP_LOGW(TAG_MAIN, "Botón reset %d s — borrando credenciales y reiniciando al portal",
                          BTN_LONGPRESS_MS / 1000);
-                /* Feedback: 3 parpadeos LED + buzzer para confirmar */
+                /* Feedback final: 3 parpadeos alternando rojo/verde para confirmar */
                 for (int i = 0; i < 3; i++) {
                     alarm_set(true);  vTaskDelay(pdMS_TO_TICKS(80));
                     alarm_set(false); vTaskDelay(pdMS_TO_TICKS(80));
@@ -429,7 +444,12 @@ static void factory_button_task(void *pvParameters)
                 esp_restart();
             }
         } else {
-            held_ms = 0;                              /* Soltó antes de tiempo → reset */
+            /* Botón liberado */
+            if (hold_active) {
+                status_led_pop_state();              /* Restaurar estado de red previo */
+                hold_active = false;
+            }
+            held_ms = 0;                              /* Soltó antes de tiempo → cancelado */
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -501,7 +521,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         /* La conexión la dispara wifi_connect_best_ap() tras escanear */
 
     } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        status_led_set(LED_ST_CONFIG);      /* Rojo parpadeando mientras reconecta */
+        status_led_set(LED_ST_RECONNECTING);  /* Naranja rápido: sin enlace WiFi */
         if (s_retry_num < WIFI_MAX_RETRY) {
             esp_wifi_connect();             /* Reintentar conexión  */
             s_retry_num++;
@@ -677,6 +697,62 @@ static void shadow_apply_delta(const char *json, int len)
     shadow_report();  /* Confirmar el cambio reportando el nuevo estado */
 }
 
+/* Publica el snapshot actual de umbrales en ems/cfg (retain=1) para
+ * que cualquier dashboard que se suscriba lea los valores vigentes.   */
+static void publish_cfg_snapshot(void)
+{
+    char payload[120];
+    int len = snprintf(payload, sizeof(payload),
+        "{\"gas_on\":%d,\"gas_off\":%d,\"temp_alarm\":%.1f}",
+        g_cfg.gas_on, g_cfg.gas_off, g_cfg.temp_alarm);
+    if (len <= 0 || len >= (int) sizeof(payload)) return;
+
+    /* emqx con retain → el dashboard al conectarse recibe el estado actual. */
+    if (s_emqx_connected) {
+        esp_mqtt_client_publish(s_emqx_client, MQTT_TOPIC_CFG, payload, len, 1, 1);
+    }
+    /* AWS: sin retain (iot:RetainPublish requiere permiso especial). */
+    if (s_mqtt_connected) {
+        esp_mqtt_client_publish(s_mqtt_client, MQTT_TOPIC_CFG, payload, len, 1, 0);
+    }
+    ESP_LOGI(TAG_MQTT, "Umbrales publicados → %s", payload);
+}
+
+/* Aplica un cambio de umbrales recibido por MQTT (ems/cfg/set).
+ * Valida rangos, persiste a NVS y republica el snapshot en ems/cfg. */
+static void apply_cfg_update(const char *json, int len)
+{
+    cJSON *root = cJSON_ParseWithLength(json, len);
+    if (!root) {
+        ESP_LOGW(TAG_MQTT, "cfg/set: JSON inválido");
+        return;
+    }
+    bool changed = false;
+
+    cJSON *jgo = cJSON_GetObjectItem(root, "gas_on");
+    if (cJSON_IsNumber(jgo)) {
+        int v = jgo->valueint;
+        if (v < 0)    v = 0;
+        if (v > 4095) v = 4095;
+        g_cfg.gas_on  = v;
+        g_cfg.gas_off = v * 85 / 100;   /* Histéresis del 85% */
+        changed = true;
+    }
+    cJSON *jta = cJSON_GetObjectItem(root, "temp_alarm");
+    if (cJSON_IsNumber(jta) && jta->valuedouble > 0) {
+        g_cfg.temp_alarm = (float) jta->valuedouble;
+        changed = true;
+    }
+    cJSON_Delete(root);
+
+    if (changed) {
+        ESP_LOGW(TAG_MQTT, "Umbrales actualizados — gas_on=%d gas_off=%d temp=%.1f",
+                 g_cfg.gas_on, g_cfg.gas_off, g_cfg.temp_alarm);
+        app_config_save();
+        publish_cfg_snapshot();
+    }
+}
+
 /* Handler de eventos del cliente MQTT */
 static void mqtt_event_handler(void *arg, esp_event_base_t base,
                                int32_t event_id, void *event_data)
@@ -690,13 +766,16 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
             /* Publicar mensaje de presencia al conectar (sin retain: AWS exige iot:RetainPublish) */
             esp_mqtt_client_publish(s_mqtt_client, MQTT_TOPIC_STATUS,
                                     "online", 6, 1, 0);  /* QoS 1, sin retain */
-            /* Suscribirse al topic de comandos (paro de emergencia) */
-            esp_mqtt_client_subscribe(s_mqtt_client, MQTT_TOPIC_CMD, 1);
+            /* Suscribirse al topic de comandos (paro de emergencia) y al de cambio de umbrales */
+            esp_mqtt_client_subscribe(s_mqtt_client, MQTT_TOPIC_CMD,     1);
+            esp_mqtt_client_subscribe(s_mqtt_client, MQTT_TOPIC_CFG_SET, 1);
             /* Suscribirse a las respuestas de la sombra */
             esp_mqtt_client_subscribe(s_mqtt_client, s_shadow_get_accepted, 1);
             esp_mqtt_client_subscribe(s_mqtt_client, s_shadow_delta, 1);
             /* Pedir el último estado guardado → recall tras corte de luz */
             shadow_request_get();
+            /* Publicar snapshot inicial de umbrales */
+            publish_cfg_snapshot();
             break;
 
         case MQTT_EVENT_DISCONNECTED:
@@ -716,6 +795,9 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                     ESP_LOGI(TAG_MQTT, "Paro de emergencia liberado");
                     shadow_report();   /* Persistir el cambio en la sombra */
                 }
+            } else if (mqtt_topic_is(event, MQTT_TOPIC_CFG_SET)) {
+                /* Cambio de umbrales solicitado por la nube */
+                apply_cfg_update(event->data, event->data_len);
             } else if (mqtt_topic_is(event, s_shadow_get_accepted)) {
                 /* Respuesta con el último estado guardado → restaurar */
                 shadow_apply_reported(event->data, event->data_len);
@@ -781,7 +863,9 @@ static void emqx_event_handler(void *arg, esp_event_base_t base,
             s_emqx_connected = true;
             ESP_LOGI(TAG_MQTT, "Conectado a emqx (dashboard)");
             esp_mqtt_client_publish(s_emqx_client, MQTT_TOPIC_STATUS, "online", 6, 1, 0);
-            esp_mqtt_client_subscribe(s_emqx_client, MQTT_TOPIC_CMD, 1);
+            esp_mqtt_client_subscribe(s_emqx_client, MQTT_TOPIC_CMD,     1);
+            esp_mqtt_client_subscribe(s_emqx_client, MQTT_TOPIC_CFG_SET, 1);
+            publish_cfg_snapshot();   /* Estado actual con retain → el dashboard lo recibe al suscribirse */
             break;
 
         case MQTT_EVENT_DISCONNECTED:
@@ -801,6 +885,9 @@ static void emqx_event_handler(void *arg, esp_event_base_t base,
                     ESP_LOGI(TAG_MQTT, "Paro liberado (dashboard)");
                     shadow_report();
                 }
+            } else if (mqtt_topic_is(event, MQTT_TOPIC_CFG_SET)) {
+                /* Cambio de umbrales solicitado desde el dashboard */
+                apply_cfg_update(event->data, event->data_len);
             }
             break;
 
@@ -835,14 +922,11 @@ static void mqtt_publish_state(bool include_aws)
 {
     char payload[180];  /* Buffer para el JSON de salida */
 
-    /* JSON con ambas temperaturas, humedad, gas, extractor
-     * temp  : DHT22 digital (°C)  | temp2 : NTC analógica (dashboard)
-     * hum   : DHT22 (%)           | gas   : MQ-135/pot ADC_CH1 (raw) */
+    /* JSON publicado: temperatura del DHT22, gas crudo, estado del extractor.
+     * (Humedad y temp2 se omiten — no se usan en la maqueta final.) */
     int len = snprintf(payload, sizeof(payload),
-        "{\"temp\":%.1f,\"temp2\":%.1f,\"hum\":%.1f,\"gas\":%d,\"fan_state\":%d,\"fan_pwm\":%lu}",
+        "{\"temp\":%.1f,\"gas\":%d,\"fan_state\":%d,\"fan_pwm\":%lu}",
         g_state.temp_dht,
-        g_state.temp2,
-        g_state.humidity,
         g_state.gas_raw,
         g_state.fan_on ? 1 : 0,
         (unsigned long) g_state.fan_pwm);
@@ -877,6 +961,7 @@ static void sensor_control_task(void *pvParameters)
     uint32_t cycle = 0;  /* Contador de ciclos para espaciar la publicación MQTT */
 
     while (1) {
+        bool dht_failed = false;  /* true si el DHT22 falló este ciclo (modo maqueta) */
 #if USE_NTC_SIM
         /* ── Simulación: NTC analógica en GPIO4 → temp2 ────────── */
         g_state.temp2 = adc_read_temp2();
@@ -892,13 +977,14 @@ static void sensor_control_task(void *pvParameters)
             ESP_LOGI(TAG_DHT, "DHT22 Temp=%.1f°C  Hum=%.1f%%", dht_temp, hum);
         } else {
             ESP_LOGW(TAG_DHT, "Lectura fallida, conservando último valor");
+            dht_failed = true;
         }
 #endif
 
-        /* ── Leer MQ-135 en ADC1_CH1 (GPIO1) ────────────────── */
+        /* ── Leer MQ-2 en ADC1_CH1 (GPIO1) ────────────────── */
         int gas = adc_read_gas();         /* Raw 0–4095            */
         g_state.gas_raw = gas;
-        ESP_LOGI(TAG_ADC, "MQ-135 raw=%d", gas);
+        ESP_LOGI(TAG_ADC, "MQ-2 raw=%d", gas);
 
         /* ── Lógica ON/OFF con histéresis ──────────────────────── */
         if (g_emergency_stop) {
@@ -932,7 +1018,22 @@ static void sensor_control_task(void *pvParameters)
         bool alarm = (gas > g_cfg.gas_on)
                   || (g_state.temp_dht > g_cfg.temp_alarm);
         g_state.alarm_active = alarm;
-        alarm_set(alarm);  /* Actualizar LED y buzzer según estado de alarma */
+        alarm_set(alarm);  /* Rojo si alarma activa, verde si todo OK */
+
+        /* ── Refresh de la pantalla OLED (temp + gas + estado FAN) ─
+         * En modo NTC sim se grafica la temperatura del NTC; en modo
+         * maqueta (DHT22 real) se grafica la temperatura del DHT22.
+         * Si la última lectura del DHT22 falló se muestra error en lugar
+         * del render normal.                                            */
+        if (dht_failed) {
+            oled_show_dht_error();
+        } else {
+#if USE_NTC_SIM
+            oled_render(g_state.temp2,    g_state.gas_raw, alarm);
+#else
+            oled_render(g_state.temp_dht, g_state.gas_raw, alarm);
+#endif
+        }
 
         /* ── Publicar: emqx cada ciclo (1 s), AWS cada PUBLISH_EVERY_N (10 s) ── */
         cycle++;
@@ -966,27 +1067,35 @@ void app_main(void)
     app_config_load();
 
     /* ── Inicializar periféricos ────────────────────────────── */
-    adc_init();        /* ADC1 para MQ-135          */
+    adc_init();        /* ADC1 para MQ-2          */
     ledc_fan_init();   /* PWM LEDC para extractor   */
-    alarm_gpio_init(); /* LED rojo + buzzer activo  */
-    buttons_init();    /* Botones de provisioning   */
+    alarm_gpio_init(); /* LED rojo de alarma + LED verde OK */
+    buttons_init();    /* Botón de reset de configuración */
     status_led_init(); /* LED RGB de estado (WS2812) */
-    status_led_set(LED_ST_CONFIG);  /* Rojo parpadeando hasta conectar/configurar */
+    oled_init();                    /* Pantalla SSD1306 I2C */
+    oled_show_splash();             /* Bienvenida: "Sistema iniciado" */
 
-    /* ── Botón externo presionado al arranque → forzar reconfiguración ── */
-    bool force_portal = button_prov_pressed();
-    if (force_portal) {
-        ESP_LOGW(TAG_MAIN, "Botón de configuración presionado — borrando credenciales");
-        app_config_factory_reset();
-    }
+    /* ── Estado del LED RGB según la ruta de arranque ─────────
+     * Si no hay credenciales arrancamos en portal cautivo (rojo lento).
+     * Si hay credenciales pero todavía no hay enlace, mostramos
+     * RECONNECTING (naranja rápido) hasta que el handler de WiFi
+     * confirme IP (azul fijo).                                          */
+    status_led_set(app_config_has_wifi() ? LED_ST_RECONNECTING : LED_ST_PORTAL);
 
-    /* ── Portal cautivo si no hay credenciales o se forzó por botón ──
+    /* ── Portal cautivo si no hay credenciales guardadas ──
      * provisioning_start_blocking() no retorna: al guardar, reinicia
      * y ese arranque entrará por la rama STA normal.                  */
-    if (force_portal || !app_config_has_wifi()) {
-        ESP_LOGW(TAG_MAIN, "Iniciando portal de configuración");
+    if (!app_config_has_wifi()) {
+        ESP_LOGW(TAG_MAIN, "Sin credenciales WiFi — iniciando portal de configuración");
         provisioning_start_blocking();
     }
+
+    /* ── Arrancar las tareas ANTES de WiFi/MQTT ───────────────
+     * Así la pantalla OLED y la lógica del extractor empiezan a refrescar
+     * con las lecturas reales de los sensores desde el primer segundo,
+     * sin tener que esperar a que terminen SNTP, TLS y MQTT (~5-30 s).  */
+    xTaskCreate(sensor_control_task, "sensor_ctrl", 4096, NULL, 5, NULL);
+    xTaskCreate(factory_button_task, "btn_factory", 2048, NULL, 4, NULL);
 
     /* ── Construir endpoints AWS con la config cargada ────────── */
     aws_build_endpoints();
@@ -1003,21 +1112,7 @@ void app_main(void)
         mqtt_init();
         /* ── Cliente MQTT hacia emqx (alimenta el dashboard web) ───── */
         emqx_init();
-        vTaskDelay(pdMS_TO_TICKS(1000));  /* Dar tiempo a los brokers para confirmar */
     }
-
-    /* ── Crear tarea de sensores y control ─────────────────── */
-    xTaskCreate(
-        sensor_control_task,   /* Función de la tarea     */
-        "sensor_ctrl",         /* Nombre (debug)          */
-        4096,                  /* Stack en bytes          */
-        NULL,                  /* Sin parámetros          */
-        5,                     /* Prioridad media         */
-        NULL                   /* Sin handle externo      */
-    );
-
-    /* ── Tarea de vigilancia del botón BOOT (re-config en runtime) ── */
-    xTaskCreate(factory_button_task, "btn_factory", 2048, NULL, 4, NULL);
 
     ESP_LOGI(TAG_MAIN, "Sistema iniciado — control cada %d ms, publicando cada %d ms",
              CONTROL_PERIOD_MS, CONTROL_PERIOD_MS * PUBLISH_EVERY_N);

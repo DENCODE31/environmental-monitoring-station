@@ -29,7 +29,12 @@ static const char *TAG = "PROV";
 #define AP_MAX_CONN  4
 #define DNS_PORT     53
 #define SCAN_MAX_AP  20              /* Redes máximas a listar en el portal     */
-#define GAS_ADC_MAX  4095            /* Fondo de escala ADC 12-bit (mapea % humo)*/
+/* Rango operativo medido experimentalmente con el MQ-2 en este montaje:
+ *   - aire limpio:  ~200-500
+ *   - humo denso:   ~1800
+ * Usamos 1800 como tope del slider para que la escala sea útil. El ADC
+ * crudo llega a 4095, pero esa parte alta nunca se alcanza en la práctica. */
+#define GAS_RAW_MAX  1800            /* Tope del slider (valor raw ADC)         */
 #define GAS_HYST_PCT 85              /* Umbral de apagado = 85% del de encendido */
 
 static httpd_handle_t s_httpd = NULL;
@@ -66,8 +71,9 @@ static const char PORTAL_HTML[] =
 "<label>Thing name</label><input id=\"th\">"
 "<label>Umbral de temperatura (°C)</label>"
 "<input id=\"ta\" type=\"number\" min=\"0\" max=\"80\" step=\"1\">"
-"<label>Nivel de humo para activar el ventilador: <b id=\"gasv\">50</b>%</label>"
-"<input id=\"gas\" type=\"range\" min=\"0\" max=\"100\" step=\"1\" value=\"50\">"
+"<label>Umbral de humo para activar el ventilador: <b id=\"gasv\">900</b> / 1800</label>"
+"<input id=\"gas\" type=\"range\" min=\"100\" max=\"1800\" step=\"10\" value=\"900\">"
+"<small>Aire limpio ≈ 200-500. Humo denso ≈ 1800. Histéresis: apaga al 85%.</small>"
 "</details>"
 "<button id=\"save\">Guardar y conectar</button>"
 "<div class=\"msg\" id=\"msg\"></div>"
@@ -81,14 +87,14 @@ static const char PORTAL_HTML[] =
 "$('ssid').appendChild(o)})}catch(e){$('ssid').innerHTML='<option>Error al escanear</option>'}}"
 "async function loadCfg(){try{let c=await(await fetch('/config')).json();"
 "$('ep').value=c.aws_endpoint;$('th').value=c.aws_thing;$('ta').value=c.temp_alarm;"
-"let p=Math.round(c.gas_on/4095*100);$('gas').value=p;$('gasv').textContent=p}catch(e){}}"
+"let v=c.gas_on||900;if(v<100)v=100;if(v>1800)v=1800;$('gas').value=v;$('gasv').textContent=v}catch(e){}}"
 "$('gas').oninput=()=>{$('gasv').textContent=$('gas').value};"
 "$('rescan').onclick=scan;"
 "$('save').onclick=async()=>{let ssid=$('ssidManual').value.trim()||$('ssid').value;"
 "if(!ssid){$('msg').className='msg err';$('msg').textContent='Selecciona una red';return}"
 "$('save').disabled=true;$('msg').className='msg';$('msg').textContent='Guardando...';"
 "let body={ssid:ssid,pass:$('pass').value,aws_endpoint:$('ep').value,aws_thing:$('th').value,"
-"temp_alarm:+$('ta').value,gas_pct:+$('gas').value};"
+"temp_alarm:+$('ta').value,gas_raw:+$('gas').value};"
 "try{let r=await fetch('/save',{method:'POST',headers:{'Content-Type':'application/json'},"
 "body:JSON.stringify(body)});if(!r.ok)throw 0;$('msg').className='msg ok';"
 "$('msg').textContent='\\u2713 Guardado. Reiniciando y conectando...'}"
@@ -293,7 +299,7 @@ static esp_err_t save_post_handler(httpd_req_t *req)
     cJSON *jep   = cJSON_GetObjectItem(root, "aws_endpoint");
     cJSON *jth   = cJSON_GetObjectItem(root, "aws_thing");
     cJSON *jta   = cJSON_GetObjectItem(root, "temp_alarm");
-    cJSON *jgp   = cJSON_GetObjectItem(root, "gas_pct");
+    cJSON *jgr   = cJSON_GetObjectItem(root, "gas_raw");
 
     /* Ajustes avanzados: solo se sobrescriben si vienen con valor válido */
     if (cJSON_IsString(jep) && jep->valuestring[0])
@@ -303,13 +309,14 @@ static esp_err_t save_post_handler(httpd_req_t *req)
     if (cJSON_IsNumber(jta) && jta->valuedouble > 0)
         g_cfg.temp_alarm = (float) jta->valuedouble;
 
-    /* Nivel de humo en % (0–100) → ADC raw; el apagado es histéresis automática */
-    if (cJSON_IsNumber(jgp)) {
-        int pct = jgp->valueint;
-        if (pct < 0)   pct = 0;
-        if (pct > 100) pct = 100;
-        g_cfg.gas_on  = pct * GAS_ADC_MAX / 100;
-        g_cfg.gas_off = g_cfg.gas_on * GAS_HYST_PCT / 100;
+    /* Umbral de humo en raw ADC (escala calibrada experimentalmente 0..1800).
+     * El umbral de apagado se calcula como histéresis del 85% del de encendido. */
+    if (cJSON_IsNumber(jgr)) {
+        int raw = jgr->valueint;
+        if (raw < 0)            raw = 0;
+        if (raw > GAS_RAW_MAX)  raw = GAS_RAW_MAX;
+        g_cfg.gas_on  = raw;
+        g_cfg.gas_off = raw * GAS_HYST_PCT / 100;
     }
 
     esp_err_t err = app_config_add_wifi(jssid->valuestring,
