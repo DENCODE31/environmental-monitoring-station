@@ -34,8 +34,10 @@ static const char *TAG = "PROV";
  *   - humo denso:   ~1800
  * Usamos 1800 como tope del slider para que la escala sea útil. El ADC
  * crudo llega a 4095, pero esa parte alta nunca se alcanza en la práctica. */
-#define GAS_RAW_MAX  1800            /* Tope del slider (valor raw ADC)         */
-#define GAS_HYST_PCT 85              /* Umbral de apagado = 85% del de encendido */
+#define GAS_RAW_MAX  1800            /* Tope del slider (valor raw ADC)              */
+#define GAS_HYST_PCT 98              /* Umbral de apagado = 98% del de encendido     */
+                                     /* (banda mínima → OFF casi al cruzar; el       */
+                                     /* anti-chatter lo da el debounce N=2 en main.c) */
 
 static httpd_handle_t s_httpd = NULL;
 
@@ -73,7 +75,7 @@ static const char PORTAL_HTML[] =
 "<input id=\"ta\" type=\"number\" min=\"0\" max=\"80\" step=\"1\">"
 "<label>Umbral de humo para activar el ventilador: <b id=\"gasv\">900</b> / 1800</label>"
 "<input id=\"gas\" type=\"range\" min=\"100\" max=\"1800\" step=\"10\" value=\"900\">"
-"<small>Aire limpio ≈ 200-500. Humo denso ≈ 1800. Histéresis: apaga al 85%.</small>"
+"<small>Aire limpio ≈ 200-500. Humo denso ≈ 1800. Histéresis: apaga al 98%.</small>"
 "</details>"
 "<button id=\"save\">Guardar y conectar</button>"
 "<div class=\"msg\" id=\"msg\"></div>"

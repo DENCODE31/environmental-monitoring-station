@@ -19,6 +19,7 @@ idf_component_register(
         lwip
         led_strip
         ssd1306
+        esp_rom
     EMBED_TXTFILES
         "certs/aws_root_ca.pem"
         "certs/aws_device_cert.pem"

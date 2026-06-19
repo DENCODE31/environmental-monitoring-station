@@ -678,7 +678,7 @@
       </label>
       <input id="th-gas" type="range" min="100" max="1800" step="10" value="900"
              style="width:100%;accent-color:#bc8cff" disabled />
-      <small style="color:#6e7681">Limpio ≈ 200-500 · Humo denso ≈ 1800 · Apaga al 85%</small>
+      <small style="color:#6e7681">Limpio ≈ 200-500 · Humo denso ≈ 1800 · Apaga al 98%</small>
     </div>
 
     <div class="cfg-row" style="margin-top:8px">
@@ -1031,7 +1031,7 @@ function connectMQTT() {
   });
 }
 
-/* ── Umbrales: sincroniza inputs con el snapshot del firmware (ems/cfg) ── */
+/* ── Umbrales: sincroniza inputs y THRESHOLDS con el snapshot del firmware (ems/cfg) ── */
 function applyCfgSnapshot(jsonStr) {
   try {
     const c = JSON.parse(jsonStr);
@@ -1039,9 +1039,13 @@ function applyCfgSnapshot(jsonStr) {
       let v = c.gas_on; if (v < 100) v = 100; if (v > 1800) v = 1800;
       document.getElementById('th-gas').value      = v;
       document.getElementById('th-gas-val').textContent = v;
+      THRESHOLDS.gas_danger = c.gas_on;
+      THRESHOLDS.gas_warn   = (typeof c.gas_off === 'number') ? c.gas_off
+                                                              : Math.round(c.gas_on * 0.85);
     }
     if (typeof c.temp_alarm === 'number') {
       document.getElementById('th-temp').value = c.temp_alarm;
+      THRESHOLDS.temp_warn = c.temp_alarm;
     }
     document.getElementById('th-msg').textContent = `Sincronizado (gas_off=${c.gas_off ?? '?'})`;
     document.getElementById('th-msg').style.color = '#3fb950';
@@ -1057,6 +1061,12 @@ function applyThresholds() {
   const temp = parseFloat(document.getElementById('th-temp').value);
   const body = { gas_on: gas, temp_alarm: temp };
   client.publish(`${root}/cfg/set`, JSON.stringify(body), { qos: 1, retain: false });
+  /* Optimista: reaccionar ya, sin esperar el retain de ems/cfg.
+     gas_warn local estimado en 85% del nuevo gas_on hasta que el firmware
+     confirme su gas_off real en el siguiente snapshot. */
+  THRESHOLDS.gas_danger = gas;
+  THRESHOLDS.gas_warn   = Math.round(gas * 0.85);
+  THRESHOLDS.temp_warn  = temp;
   document.getElementById('th-msg').textContent = `Enviado: gas_on=${gas} temp=${temp}°C`;
   document.getElementById('th-msg').style.color = '#d29922';
   logMsg(`Umbrales solicitados → gas_on=${gas} temp=${temp}`, 'inf');

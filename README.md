@@ -158,3 +158,15 @@ Para salir del monitor: `Ctrl + ]`
 **Yeison Dénnir Termal Cuastumal**  
 Ingeniería Electrónica — Universidad Nacional de Colombia · 2026  
 [GitHub](https://github.com/DENCODE31)
+
+
+---
+
+## Estado del proyecto
+
+**COMPLETADO** — Semestre 2026-1 cerrado.
+
+- Fecha cierre: 2026-06-18
+- Materia: INSTRUMENTACION
+- Entrega: aprobada
+- Estado código: funcional, archivado

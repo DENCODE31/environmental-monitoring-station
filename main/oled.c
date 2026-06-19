@@ -54,6 +54,32 @@ void oled_show_splash(void)
     show_line(6, "  Conectando... ", false);
 }
 
+void oled_show_calibrating(void)
+{
+    if (!s_ready) return;
+
+    ssd1306_clear_screen(&s_oled, false);
+    show_line(1, "  CALIBRANDO    ", true);
+    show_line(3, "    MQ-2...     ", false);
+    show_line(5, "  Espere 30 s   ", false);
+    show_line(7, " NO GAS CERCA   ", true);
+}
+
+void oled_show_baseline(int baseline, int gas_on, int gas_off)
+{
+    if (!s_ready) return;
+
+    ssd1306_clear_screen(&s_oled, false);
+    show_line(1, "   CALIBRADO!   ", true);
+    char line[17];
+    snprintf(line, sizeof(line), "Baseline: %4d  ", baseline);
+    show_line(3, line, false);
+    snprintf(line, sizeof(line), "ON: %4d        ", gas_on);
+    show_line(4, line, false);
+    snprintf(line, sizeof(line), "OFF: %4d       ", gas_off);
+    show_line(5, line, false);
+}
+
 void oled_show_dht_error(void)
 {
     if (!s_ready) return;
@@ -63,7 +89,7 @@ void oled_show_dht_error(void)
     show_line(4, "     DHT22      ", true);
 }
 
-void oled_render(float temp_c, int gas_raw, bool alarm_active)
+void oled_render(float temp_c, int gas_raw, bool fan_on)
 {
     if (!s_ready) return;
 
@@ -90,9 +116,9 @@ void oled_render(float temp_c, int gas_raw, bool alarm_active)
     snprintf(line, sizeof(line), "Gas:     %5d  ", gas_raw);
     show_line(5, line, false);
 
-    /* Separador inferior y estado del extractor (invertido si alarma) */
+    /* Separador inferior y estado físico del extractor (invertido si encendido) */
     show_line(6, "----------------", false);
     show_line(7,
-              alarm_active ? "EXTRAC: ACTIVADO" : "EXTRAC: APAGADO ",
-              alarm_active);
+              fan_on ? "EXTRAC: ACTIVADO" : "EXTRAC: APAGADO ",
+              fan_on);
 }

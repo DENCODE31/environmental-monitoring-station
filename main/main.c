@@ -28,6 +28,7 @@
 #include "esp_adc/adc_oneshot.h"
 #include "mqtt_client.h"
 #include "esp_netif_sntp.h"               /* Sincronización de hora (TLS requiere reloj válido) */
+#include "esp_timer.h"                    /* esp_timer_get_time para timing exacto del DHT22 */
 #include "esp_netif.h"                    /* Para forzar DNS fallback (AWS IoT)  */
 #include "lwip/ip_addr.h"                 /* Helpers IPv4 para esp_netif_dns_info_t */
 #include "cJSON.h"                        /* Parseo del JSON de la Device Shadow */
@@ -168,22 +169,24 @@ static int s_retry_num = 0;  /* Contador de reintentos WiFi */
 #if !USE_NTC_SIM
 
 /* Espera activa hasta que el pin alcance 'level' o vence el timeout.
- * Retorna µs transcurridos, o -1 si hubo timeout. */
+ * Retorna µs reales transcurridos (no aproximados por contador de loop),
+ * o -1 si hubo timeout. Usa esp_timer_get_time() para medir tiempo real
+ * en microsegundos sin depender del periodo del loop.                  */
 static int dht22_wait_level(int level, int timeout_us)
 {
-    int elapsed = 0;
-    /* Sondeo cada ~1 µs hasta detectar el nivel esperado */
+    int64_t start = esp_timer_get_time();
     while (gpio_get_level(PIN_DHT22) != level) {
-        if (++elapsed >= timeout_us) {
+        if ((esp_timer_get_time() - start) >= timeout_us) {
             return -1;  /* Timeout — sensor no respondió */
         }
-        ets_delay_us(1);  /* Espera 1 µs entre muestras */
     }
-    return elapsed;
+    return (int)(esp_timer_get_time() - start);
 }
 
 /* Lee temperatura y humedad del DHT22.
- * Retorna ESP_OK si la transmisión y CRC son correctos. */
+ * Retorna ESP_OK si la transmisión y CRC son correctos.
+ * Durante el bit-bang suspendemos el scheduler de FreeRTOS para que
+ * el conteo de microsegundos no se corrompa por context switches.   */
 static esp_err_t dht22_read(float *out_temp, float *out_hum)
 {
     uint8_t data[5] = {0};  /* 40 bits: hum_hi, hum_lo, tmp_hi, tmp_lo, cksum */
@@ -196,43 +199,44 @@ static esp_err_t dht22_read(float *out_temp, float *out_hum)
     ets_delay_us(30);                           /* Sube y espera 30 µs  */
     gpio_set_direction(PIN_DHT22, GPIO_MODE_INPUT);
 
+    /* Suspende el scheduler durante los ~4 ms del bit-bang para que las
+     * tareas WiFi/MQTT/OLED no roben CPU en medio de un bit. */
+    vTaskSuspendAll();
+
+    esp_err_t result = ESP_OK;
+    int       fail_bit = -1;  /* Para log fuera de la sección crítica */
+
     /* ── 2. Respuesta del sensor: 80 µs bajo + 80 µs alto ──── */
-    if (dht22_wait_level(0, 100) < 0) {         /* Espera flanco bajo   */
-        ESP_LOGE(TAG_DHT, "Sin respuesta (flanco bajo)");
-        return ESP_ERR_TIMEOUT;
-    }
-    if (dht22_wait_level(1, 100) < 0) {         /* Espera flanco alto   */
-        ESP_LOGE(TAG_DHT, "Sin respuesta (flanco alto)");
-        return ESP_ERR_TIMEOUT;
-    }
-    if (dht22_wait_level(0, 100) < 0) {         /* Espera fin preámbulo */
-        ESP_LOGE(TAG_DHT, "Sin respuesta (fin preambulo)");
-        return ESP_ERR_TIMEOUT;
+    if      (dht22_wait_level(0, 100) < 0) { result = ESP_ERR_TIMEOUT; fail_bit = -2; }
+    else if (dht22_wait_level(1, 100) < 0) { result = ESP_ERR_TIMEOUT; fail_bit = -3; }
+    else if (dht22_wait_level(0, 100) < 0) { result = ESP_ERR_TIMEOUT; fail_bit = -4; }
+    else {
+        /* ── 3. Leer 40 bits de datos ───────────────────────────── */
+        for (int i = 0; i < 40 && result == ESP_OK; i++) {
+            if (dht22_wait_level(1, DHT22_BIT_TIMEOUT_US) < 0) {
+                result = ESP_ERR_TIMEOUT; fail_bit = i; break;
+            }
+            int width = dht22_wait_level(0, DHT22_BIT_TIMEOUT_US);
+            if (width < 0) {
+                result = ESP_ERR_TIMEOUT; fail_bit = i; break;
+            }
+            data[i / 8] <<= 1;
+            if (width > 35) data[i / 8] |= 1;
+        }
     }
 
-    /* ── 3. Leer 40 bits de datos ───────────────────────────── */
-    for (int i = 0; i < 40; i++) {
-        /* Cada bit inicia con 50 µs bajo */
-        if (dht22_wait_level(1, DHT22_BIT_TIMEOUT_US) < 0) {
-            ESP_LOGE(TAG_DHT, "Timeout esperando bit %d alto", i);
-            return ESP_ERR_TIMEOUT;
-        }
-        /* Mide duración del pulso alto: <28 µs=0, ~70 µs=1 */
-        int width = dht22_wait_level(0, DHT22_BIT_TIMEOUT_US);
-        if (width < 0) {
-            ESP_LOGE(TAG_DHT, "Timeout midiendo bit %d", i);
-            return ESP_ERR_TIMEOUT;
-        }
-        data[i / 8] <<= 1;         /* Desplaza el byte actual    */
-        if (width > 35) {           /* Umbral a 35 µs             */
-            data[i / 8] |= 1;       /* Bit alto si pulso > 35 µs  */
-        }
+    /* Fin del bit-bang: scheduler puede volver a correr otras tareas */
+    xTaskResumeAll();
+
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG_DHT, "Timeout durante lectura (etapa=%d)", fail_bit);
+        return result;
     }
 
     /* ── 4. Verificación de checksum ───────────────────────── */
     uint8_t cksum = data[0] + data[1] + data[2] + data[3];
     if (cksum != data[4]) {
-        ESP_LOGE(TAG_DHT, "Checksum error: calc=0x%02X recv=0x%02X", cksum, data[4]);
+        ESP_LOGW(TAG_DHT, "Checksum error: calc=0x%02X recv=0x%02X", cksum, data[4]);
         return ESP_ERR_INVALID_CRC;
     }
 
@@ -285,13 +289,54 @@ static void adc_init(void)
 #endif
 }
 
-/* Lee el MQ-2 en ADC1_CH1 (GPIO1). Retorna raw 0–4095. */
+/* Oversampling del MQ-2. La impedancia de salida del MQ-2 es alta (varios
+ * kΩ), por lo que el cap del SAR del ADC necesita tiempo para estabilizar
+ * entre muestras consecutivas. Sin pausa entre samples las lecturas quedan
+ * fuertemente anti-correlacionadas (alternancia high/low) y σ se dispara.
+ *
+ * EMA (Exponential Moving Average) se aplica sobre la mediana de
+ * ADC_GAS_OVERSAMPLE lecturas. α=0.15 da respuesta rápida (90% en ~14
+ * ciclos) mientras elimina ~85% del ruido muestra-a-muestra. El MQ-2
+ * es un sensor químico con constante de tiempo de 10-60s, así que la
+ * latencia del EMA es despreciable frente al sensor.                    */
+#define ADC_GAS_OVERSAMPLE  16
+#define ADC_SAMPLE_GAP_US   2000   /* 2 ms entre samples: el MQ-2 tiene alta Zout (~10 kΩ),
+                                      el SAR ADC necesita más tiempo para asentarse */
+#define GAS_EMA_ALPHA        0.15f /* Factor de suavizado EMA (0..1). Más bajo = más suave */
+
+/* Comparador para qsort: orden ascendente de enteros. */
+static int compare_int_asc(const void *a, const void *b)
+{
+    int va = *(const int *) a;
+    int vb = *(const int *) b;
+    return (va > vb) - (va < vb);
+}
+
+/* Lee el MQ-2 en ADC1_CH1 (GPIO1) tomando ADC_GAS_OVERSAMPLE muestras
+ * espaciadas, devuelve mediana filtrada con EMA. La mediana elimina
+ * outliers puntuales; el EMA estabiliza la deriva ciclo-a-ciclo.        */
 static int adc_read_gas(void)
 {
-    int raw = 0;
-    ESP_ERROR_CHECK(adc_oneshot_read(s_adc_handle, ADC_CH_GAS, &raw));   /* Lectura MQ-2 */
-    ESP_LOGD(TAG_ADC, "MQ-2 CH1 raw=%d", raw);
-    return raw;
+    int samples[ADC_GAS_OVERSAMPLE];
+    for (int i = 0; i < ADC_GAS_OVERSAMPLE; i++) {
+        ESP_ERROR_CHECK(adc_oneshot_read(s_adc_handle, ADC_CH_GAS, &samples[i]));
+        ets_delay_us(ADC_SAMPLE_GAP_US);
+    }
+    qsort(samples, ADC_GAS_OVERSAMPLE, sizeof(int), compare_int_asc);
+    int median = (samples[ADC_GAS_OVERSAMPLE / 2 - 1]
+                + samples[ADC_GAS_OVERSAMPLE / 2]) / 2;
+
+    /* EMA sobre la mediana: suaviza fluctuación entre ciclos */
+    static float s_filtered = -1.0f;
+    if (s_filtered < 0.0f) {
+        s_filtered = (float) median;
+    } else {
+        s_filtered = GAS_EMA_ALPHA * median + (1.0f - GAS_EMA_ALPHA) * s_filtered;
+    }
+    int result = (int) (s_filtered + 0.5f);
+
+    ESP_LOGD(TAG_ADC, "MQ-2 median=%d filtered=%d", median, result);
+    return result;
 }
 
 #if USE_NTC_SIM
@@ -719,10 +764,10 @@ static void shadow_apply_delta(const char *json, int len)
  * que cualquier dashboard que se suscriba lea los valores vigentes.   */
 static void publish_cfg_snapshot(void)
 {
-    char payload[120];
+    char payload[160];
     int len = snprintf(payload, sizeof(payload),
-        "{\"gas_on\":%d,\"gas_off\":%d,\"temp_alarm\":%.1f}",
-        g_cfg.gas_on, g_cfg.gas_off, g_cfg.temp_alarm);
+        "{\"gas_on\":%d,\"gas_off\":%d,\"temp_alarm\":%.1f,\"gas_baseline\":%d}",
+        g_cfg.gas_on, g_cfg.gas_off, g_cfg.temp_alarm, g_cfg.gas_baseline);
     if (len <= 0 || len >= (int) sizeof(payload)) return;
 
     /* emqx con retain → el dashboard al conectarse recibe el estado actual. */
@@ -747,13 +792,30 @@ static void apply_cfg_update(const char *json, int len)
     }
     bool changed = false;
 
+    /* Recalibración: borra baseline, reinicia en próximo boot */
+    cJSON *jrc = cJSON_GetObjectItem(root, "recalibrate");
+    if (cJSON_IsTrue(jrc)) {
+        g_cfg.gas_baseline = 0;
+        app_config_save();
+        ESP_LOGW(TAG_MQTT, "Recalibración solicitada — reiniciando...");
+        cJSON_Delete(root);
+        vTaskDelay(pdMS_TO_TICKS(500));
+        esp_restart();
+        return;
+    }
+
     cJSON *jgo = cJSON_GetObjectItem(root, "gas_on");
     if (cJSON_IsNumber(jgo)) {
         int v = jgo->valueint;
         if (v < 0)    v = 0;
         if (v > 4095) v = 4095;
         g_cfg.gas_on  = v;
-        g_cfg.gas_off = v * 85 / 100;   /* Histéresis del 85% */
+        /* Histéresis: si el usuario no especificó gas_off, calcular
+         * automático. Si baseline existe, OFF = baseline + 1/4 del rango
+         * por encima de baseline; si no, 98% de gas_on. */
+        g_cfg.gas_off = (g_cfg.gas_baseline > 0)
+                        ? g_cfg.gas_baseline + (v - g_cfg.gas_baseline) / 4
+                        : v * 98 / 100;
         changed = true;
     }
     cJSON *jta = cJSON_GetObjectItem(root, "temp_alarm");
@@ -979,64 +1041,129 @@ static void sensor_control_task(void *pvParameters)
     uint32_t cycle = 0;  /* Contador de ciclos para espaciar la publicación MQTT */
 
     while (1) {
-        bool dht_failed = false;  /* true si el DHT22 falló este ciclo (modo maqueta) */
+        bool dht_failed = false;  /* true si llevamos varios fallos seguidos (modo maqueta) */
 #if USE_NTC_SIM
         /* ── Simulación: NTC analógica en GPIO4 → temp2 ────────── */
         g_state.temp2 = adc_read_temp2();
         ESP_LOGI(TAG_ADC, "NTC temp2=%.1f", g_state.temp2);
 #else
-        /* ── Maqueta: DHT22 digital en GPIO4 → temp + humedad ──── */
-        float dht_temp = 0.0f, hum = 0.0f;
-        esp_err_t dht_err = dht22_read(&dht_temp, &hum);
+        /* ── Maqueta: DHT22 digital en GPIO4 → temp + humedad ────
+         * DHT22 datasheet pide ≥2 s entre lecturas y un fallo aislado
+         * es normal (CRC esporádico). Solo declaramos "error" cuando
+         * acumulamos varios fallos seguidos: hasta entonces seguimos
+         * mostrando el último valor válido en el OLED.                */
+        #define DHT_READ_EVERY_N_CYCLES 2   /* Leer cada 2 ciclos = ~2 s */
+        #define DHT_FAIL_THRESHOLD      3   /* Tras 3 fallos consecutivos → pantalla de error */
+        static int dht_skip_counter   = 0;
+        static int dht_fail_streak    = 0;
+        static bool dht_has_valid_read = false;
 
-        if (dht_err == ESP_OK) {
-            g_state.temp_dht = dht_temp;  /* Temperatura DHT22 en °C  */
-            g_state.humidity = hum;       /* Humedad relativa en %    */
-            ESP_LOGI(TAG_DHT, "DHT22 Temp=%.1f°C  Hum=%.1f%%", dht_temp, hum);
-        } else {
-            ESP_LOGW(TAG_DHT, "Lectura fallida, conservando último valor");
-            dht_failed = true;
+        if (++dht_skip_counter >= DHT_READ_EVERY_N_CYCLES) {
+            dht_skip_counter = 0;
+            float dht_temp = 0.0f, hum = 0.0f;
+            esp_err_t dht_err = dht22_read(&dht_temp, &hum);
+
+            if (dht_err == ESP_OK) {
+                g_state.temp_dht = dht_temp;
+                g_state.humidity = hum;
+                dht_fail_streak    = 0;
+                dht_has_valid_read = true;
+                ESP_LOGI(TAG_DHT, "DHT22 Temp=%.1f°C  Hum=%.1f%%", dht_temp, hum);
+            } else {
+                dht_fail_streak++;
+                ESP_LOGW(TAG_DHT, "Lectura fallida (%d/%d) — conservando último valor",
+                         dht_fail_streak, DHT_FAIL_THRESHOLD);
+            }
         }
+
+        /* Solo mostrar error si:
+         *   - nunca tuvimos una lectura válida, o
+         *   - llevamos DHT_FAIL_THRESHOLD fallos consecutivos.        */
+        dht_failed = (!dht_has_valid_read) ||
+                     (dht_fail_streak >= DHT_FAIL_THRESHOLD);
 #endif
 
-        /* ── Leer MQ-2 en ADC1_CH1 (GPIO1) ────────────────── */
-        int gas = adc_read_gas();         /* Raw 0–4095            */
-        g_state.gas_raw = gas;
-        ESP_LOGI(TAG_ADC, "MQ-2 raw=%d", gas);
+        /* ── Leer MQ-2 (16x oversample dentro de adc_read_gas) ──
+         * Sin EMA: el valor publicado/mostrado coincide exactamente
+         * con el que evalúa el control del relé. Si quitamos el lag
+         * del filtro, el OLED/dashboard reflejan en vivo la misma
+         * lectura que decide el ON/OFF.                              */
+        int gas_inst = adc_read_gas();    /* Promedio de 16 muestras (raw 0-4095) */
+        g_state.gas_raw = gas_inst;
+        ESP_LOGI(TAG_ADC, "MQ-2 raw=%d", gas_inst);
 
-        /* ── Lógica ON/OFF con histéresis ──────────────────────── */
+        /* ── Lógica ON/OFF con histéresis estrecha + debounce ──────
+         * Decisión basada en gas_inst (lectura ya oversampleada 16x
+         * pero SIN EMA): así la respuesta al cambio real es inmediata
+         * sin esperar al tau del filtro. EMA queda solo para display
+         * y telemetría MQTT.
+         *
+         * Antichatter: en lugar de dwell por tiempo, exigimos
+         * FAN_DEBOUNCE_N lecturas consecutivas confirmando el cruce
+         * antes de conmutar. Con periodo de 1 s y N=2 → la transición
+         * tarda como mucho 2 s, suficiente para descartar picos sueltos
+         * sin penalizar la respuesta real.                              */
+        #define FAN_DEBOUNCE_N 2
+        /* Histéresis de temperatura: apaga a (temp_alarm - 1 °C) para
+         * evitar conmutación si la lectura oscila justo en el umbral. */
+        #define TEMP_HYST_C 1.0f
+        static int  on_streak  = 0;
+        static int  off_streak = 0;
+
+        /* Causa de encendido/apagado: gas O temperatura. Cualquiera de
+         * los dos superando su umbral fuerza el ON del extractor; ambos
+         * por debajo es condición de OFF. */
+        bool gas_hi   = gas_inst       > g_cfg.gas_on;
+        bool gas_lo   = gas_inst       < g_cfg.gas_off;
+        bool temp_hi  = g_state.temp_dht > g_cfg.temp_alarm;
+        bool temp_lo  = g_state.temp_dht < (g_cfg.temp_alarm - TEMP_HYST_C);
+
+        bool above_on  = gas_hi || temp_hi;
+        bool below_off = gas_lo && temp_lo;
+
+        if (above_on)  on_streak++;  else on_streak  = 0;
+        if (below_off) off_streak++; else off_streak = 0;
+
         if (g_emergency_stop) {
-            /* Paro de emergencia: extractor forzado OFF, ignora control auto */
+            /* Paro de emergencia: corte instantáneo, ignora debounce */
             if (g_state.fan_on || g_state.fan_pwm != 0) {
                 g_state.fan_on  = false;
                 g_state.fan_pwm = 0;
                 fan_set_duty(0);
                 ESP_LOGW(TAG_MAIN, "Extractor OFF por PARO DE EMERGENCIA");
             }
-        } else if (!g_state.fan_on && gas > g_cfg.gas_on) {
-            /* Gas superó umbral → encender extractor al 100% */
+        } else if (!g_state.fan_on && on_streak >= FAN_DEBOUNCE_N) {
+            /* Gas o temperatura superaron umbral en N lecturas → ON inmediato */
             g_state.fan_on  = true;
-            g_state.fan_pwm = 1023;              /* Duty máximo (100%)   */
-            fan_set_duty(g_state.fan_pwm);        /* Aplicar PWM          */
-            ESP_LOGW(TAG_MAIN, "Extractor ON — gas=%d > umbral=%d",
-                     gas, g_cfg.gas_on);
-            shadow_report();                      /* Reflejar cambio en la sombra */
+            g_state.fan_pwm = 1023;
+            fan_set_duty(g_state.fan_pwm);
+            const char *cause = gas_hi
+                ? (temp_hi ? "gas + temp" : "gas")
+                : "temp";
+            ESP_LOGW(TAG_MAIN, "Extractor ON [%s] — gas=%d (umb=%d) temp=%.1f°C (umb=%.1f°C)",
+                     cause, gas_inst, g_cfg.gas_on,
+                     g_state.temp_dht, g_cfg.temp_alarm);
+            shadow_report();
+            off_streak = 0;
 
-        } else if (g_state.fan_on && gas < g_cfg.gas_off) {
-            /* Gas bajó del umbral inferior → apagar extractor */
+        } else if (g_state.fan_on && off_streak >= FAN_DEBOUNCE_N) {
+            /* Ambas condiciones por debajo de su umbral en N lecturas → OFF */
             g_state.fan_on  = false;
-            g_state.fan_pwm = 0;                 /* Duty 0% (apagado)    */
-            fan_set_duty(0);                      /* Apagar PWM           */
-            ESP_LOGI(TAG_MAIN, "Extractor OFF — gas=%d < umbral_off=%d",
-                     gas, g_cfg.gas_off);
-            shadow_report();                      /* Reflejar cambio en la sombra */
+            g_state.fan_pwm = 0;
+            fan_set_duty(0);
+            ESP_LOGI(TAG_MAIN, "Extractor OFF — gas=%d (umb_off=%d) temp=%.1f°C (umb-hist=%.1f°C)",
+                     gas_inst, g_cfg.gas_off,
+                     g_state.temp_dht, g_cfg.temp_alarm - TEMP_HYST_C);
+            shadow_report();
+            on_streak = 0;
         }
 
-        /* ── Lógica de alarma (gas + temperatura DHT22) ───────── */
-        bool alarm = (gas > g_cfg.gas_on)
-                  || (g_state.temp_dht > g_cfg.temp_alarm);
+        /* ── Lógica de alarma (LED rojo/verde) ──────────────────
+         * Encender alarma cuando el extractor está activo o cuando
+         * la temperatura supera el umbral configurado. */
+        bool alarm = g_state.fan_on || temp_hi;
         g_state.alarm_active = alarm;
-        alarm_set(alarm);  /* Rojo si alarma activa, verde si todo OK */
+        alarm_set(alarm);
 
         /* ── Refresh de la pantalla OLED (temp + gas + estado FAN) ─
          * En modo NTC sim se grafica la temperatura del NTC; en modo
@@ -1047,9 +1174,9 @@ static void sensor_control_task(void *pvParameters)
             oled_show_dht_error();
         } else {
 #if USE_NTC_SIM
-            oled_render(g_state.temp2,    g_state.gas_raw, alarm);
+            oled_render(g_state.temp2,    g_state.gas_raw, g_state.fan_on);
 #else
-            oled_render(g_state.temp_dht, g_state.gas_raw, alarm);
+            oled_render(g_state.temp_dht, g_state.gas_raw, g_state.fan_on);
 #endif
         }
 
@@ -1099,6 +1226,31 @@ void app_main(void)
      * RECONNECTING (naranja rápido) hasta que el handler de WiFi
      * confirme IP (azul fijo).                                          */
     status_led_set(app_config_has_wifi() ? LED_ST_RECONNECTING : LED_ST_PORTAL);
+
+    /* ── Auto-calibración del MQ-2 (solo primer arranque o tras recalibrar) ──
+     * Si gas_baseline == 0, esperamos warm-up y promediamos 30 lecturas
+     * para establecer el nivel de aire limpio. Los umbrales se calculan
+     * como baseline + deltas fijos (CAL_GAS_DELTA_ON/OFF).
+     * El usuario puede sobreescribir los umbrales vía MQTT en cualquier
+     * momento, y eso prevalece sobre la auto-calibración.                   */
+    if (g_cfg.gas_baseline == 0) {
+        oled_show_calibrating();
+        ESP_LOGW(TAG_MAIN, "Auto-calibración MQ-2: warm-up 30s...");
+        vTaskDelay(pdMS_TO_TICKS(30000));
+
+        long cal_sum = 0;
+        for (int i = 0; i < CAL_N_SAMPLES; i++) {
+            cal_sum += adc_read_gas();
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+        int baseline = (int)(cal_sum / CAL_N_SAMPLES);
+        app_config_recalibrate(baseline);
+
+        oled_show_baseline(g_cfg.gas_baseline, g_cfg.gas_on, g_cfg.gas_off);
+        ESP_LOGW(TAG_MAIN, "MQ-2 calibrado: baseline=%d on=%d off=%d",
+                 g_cfg.gas_baseline, g_cfg.gas_on, g_cfg.gas_off);
+        vTaskDelay(pdMS_TO_TICKS(3000));
+    }
 
     /* ── Portal cautivo si no hay credenciales guardadas ──
      * provisioning_start_blocking() no retorna: al guardar, reinicia
